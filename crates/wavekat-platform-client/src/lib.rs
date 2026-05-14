@@ -1,13 +1,49 @@
 //! Rust client for the WaveKat platform.
 //!
 //! Reusable across consumers (the [`wavekat-cli`] binary `wk`, the
-//! [`wavekat-voice`] desktop daemon, future WaveKat tools) so platform
-//! auth and artifact upload have one implementation, not many.
+//! WaveKat desktop daemon, future WaveKat tools) so platform auth and
+//! HTTP plumbing have one implementation, not many.
 //!
-//! Status: early scaffolding. The first slice — `Client` (reqwest-backed
-//! bearer HTTP) and the loopback OAuth handshake — is being ported from
-//! [`wavekat-cli`]. See the design notes in the [`wavekat-voice`] repo,
-//! `docs/13-platform-login-and-client.md`.
+//! ## Quick start
+//!
+//! ```no_run
+//! use wavekat_platform_client::{loopback_handshake, Client, HandshakeOptions};
+//!
+//! # async fn run() -> wavekat_platform_client::Result<()> {
+//! let pending = loopback_handshake(
+//!     "https://platform.wavekat.com",
+//!     HandshakeOptions::default(),
+//! )?;
+//! println!("Open: {}", pending.url());
+//! let outcome = pending.wait().await?;
+//!
+//! let client = Client::new("https://platform.wavekat.com", outcome.token)?;
+//! let me = client.whoami().await?;
+//! println!("signed in as {}", me.login);
+//! # Ok(()) }
+//! ```
+//!
+//! ## What this crate is (and isn't)
+//!
+//! - **Storage-agnostic.** `Client::new(base_url, token)` is the contract.
+//!   The crate never reads or writes disk; consumers pick where the token
+//!   lives (config file, OS keychain, env var, in-memory test fixture).
+//! - **Browser-agnostic.** [`loopback_handshake`] returns the sign-in URL;
+//!   the caller decides how to open it (`webbrowser::open`,
+//!   `shell.openExternal`, `println!`, …).
+//! - **Runtime-light.** Async surface uses `reqwest`; consumers bring
+//!   their own tokio runtime.
 //!
 //! [`wavekat-cli`]: https://github.com/wavekat/wavekat-cli
-//! [`wavekat-voice`]: https://github.com/wavekat/wavekat-voice
+
+mod client;
+mod error;
+mod me;
+mod oauth;
+mod token;
+
+pub use client::Client;
+pub use error::{Error, Result};
+pub use me::Me;
+pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
+pub use token::Token;

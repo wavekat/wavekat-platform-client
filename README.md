@@ -32,7 +32,7 @@ This crate is the one place that knows how to talk to `platform.wavekat.com`. Ea
 ## Design
 
 - **Zero opinion on storage.** The crate exposes a `Client::new(base_url, token)` constructor. Consumers load the token from wherever fits — keychain, file, env var, in-memory test fixture — and hand it in.
-- **Single bearer token shape**: `wkcli_…` issued by `POST /api/auth/cli/tokens`. The "cli" prefix is historical; the platform mints the same kind of token for any caller that completes the loopback OAuth flow.
+- **Single bearer token shape**: `wk_…` issued by `POST /api/auth/cli/tokens`. The route path is historical (the CLI was the only consumer originally); the platform mints the same kind of token for any caller that completes the loopback OAuth flow.
 - **No async runtime opinion in the surface** — uses `reqwest` async with whatever runtime the consumer brings (tokio in practice).
 
 ## License
