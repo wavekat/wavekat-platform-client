@@ -39,7 +39,7 @@ impl Token {
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Show the prefix up to (and including) the underscore — which
-        // is conventional for these tokens (`wkcli_…`) and useful for
+        // is conventional for these tokens (`wk_…`) and useful for
         // quickly distinguishing "I have a token" from "I don't" in
         // logs without exposing any of the secret bytes.
         let prefix = match self.0.split_once('_') {
@@ -60,12 +60,12 @@ mod tests {
 
     #[test]
     fn debug_redacts_secret() {
-        let secret = "wkcli_abcdef1234567890";
+        let secret = "wk_abcdef1234567890";
         let t = Token::new(secret);
         let dbg = format!("{t:?}");
         assert!(dbg.contains("***"), "{dbg} should contain ***");
         assert!(!dbg.contains(secret), "{dbg} leaked the secret");
-        assert!(dbg.contains("wkcli_"), "{dbg} should keep the prefix");
+        assert!(dbg.contains("wk_"), "{dbg} should keep the prefix");
     }
 
     #[test]
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn as_str_returns_raw() {
-        let t = Token::new("wkcli_xyz");
-        assert_eq!(t.as_str(), "wkcli_xyz");
+        let t = Token::new("wk_xyz");
+        assert_eq!(t.as_str(), "wk_xyz");
     }
 }

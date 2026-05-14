@@ -31,7 +31,7 @@ Make "talk to the WaveKat platform from Rust" a solved problem so each consumer 
 
 - Apache-2.0 licensed; matches `wavekat-cli` and `wavekat-core`.
 - Workspace layout: root `Cargo.toml` is `[workspace]`, real crate lives in `crates/wavekat-platform-client/`. Lets us add focused sub-crates later (e.g. `wavekat-platform-client-mock` for downstream test fixtures) without restructuring.
-- `wkcli_…` is today's token prefix — historical from when only `wk` minted tokens. Don't rename the field, even when other clients start using it; the prefix is just a string.
+- Bearer tokens use the `wk_…` prefix. (Was `wkcli_` while the CLI was the only consumer; renamed in the platform before any real users existed, see wavekat-platform PR #116.) The prefix is just a visual marker — cryptographic strength is in the entropy after it.
 
 ## Related repos
 

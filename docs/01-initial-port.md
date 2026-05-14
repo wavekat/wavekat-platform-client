@@ -95,7 +95,7 @@ impl Token {
     pub fn new(raw: impl Into<String>) -> Self;
     pub fn as_str(&self) -> &str;
 }
-impl fmt::Debug for Token { /* prints "Token(wkcli_***redacted)" */ }
+impl fmt::Debug for Token { /* prints "Token(wk_***redacted)" */ }
 // no Display — must opt in via .as_str()
 
 // error.rs

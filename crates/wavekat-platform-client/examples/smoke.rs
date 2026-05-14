@@ -4,8 +4,8 @@
 //! Usage:
 //!
 //!   cargo run --example smoke -- login
-//!   cargo run --example smoke -- whoami --token wkcli_xxx
-//!   cargo run --example smoke -- revoke --token wkcli_xxx
+//!   cargo run --example smoke -- whoami --token wk_xxx
+//!   cargo run --example smoke -- revoke --token wk_xxx
 //!
 //! The base URL defaults to `https://platform.wavekat.com`; override
 //! with `--base-url` or `WK_BASE_URL`.
