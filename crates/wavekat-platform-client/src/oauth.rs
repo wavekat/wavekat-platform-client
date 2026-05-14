@@ -4,8 +4,9 @@
 //!
 //!   1. Bind a TCP listener on `127.0.0.1:<random ephemeral port>`.
 //!   2. Generate a one-shot CSRF state.
-//!   3. Compute the platform's `/cli-login` URL with `?callback=…&state=…`
-//!      and hand it back to the caller via [`PendingHandshake::url`].
+//!   3. Compute the platform's `/cli-login` URL with
+//!      `?callback=…&state=…&client=…[&source=…]` and hand it back to
+//!      the caller via [`PendingHandshake::url`].
 //!   4. Caller opens the URL however they want — `webbrowser::open` for a
 //!      CLI, `shell.openExternal` for an Electron app, plain `println!`
 //!      for a remote host with no browser.
@@ -32,9 +33,22 @@ use crate::token::Token;
 /// Tunables for [`loopback_handshake`].
 #[derive(Debug, Clone)]
 pub struct HandshakeOptions {
-    /// Display name shown in the user's platform "Active sessions" list.
-    /// Defaults to `"wavekat-platform-client on <hostname>"`.
-    pub client_name: Option<String>,
+    /// Short app identifier sent as the `client` query param. Shown as
+    /// the consent screen title and in the user's "Active sessions"
+    /// listing. Defaults to `"wavekat-platform-client"`; consumers
+    /// usually want to override with their own product name (e.g.
+    /// `"wavekat-voice"`).
+    pub client: Option<String>,
+    /// Origin label sent as the `source` query param. Shown beside the
+    /// title as "from <source>" and in the listing. Typically the
+    /// machine's hostname; defaults to that. Set to `Some("")` (or
+    /// override [`Self::omit_source`] to true) to suppress it for
+    /// privacy.
+    pub source: Option<String>,
+    /// If true, no `source` is sent at all — the platform will store
+    /// `null` and the consent UI won't render a "from …" line. Useful
+    /// for desktop apps that don't want to disclose the hostname.
+    pub omit_source: bool,
     /// How long to wait for the browser callback. Default: 5 min.
     pub timeout: Duration,
 }
@@ -42,7 +56,9 @@ pub struct HandshakeOptions {
 impl Default for HandshakeOptions {
     fn default() -> Self {
         Self {
-            client_name: None,
+            client: None,
+            source: None,
+            omit_source: false,
             timeout: Duration::from_secs(5 * 60),
         }
     }
@@ -123,16 +139,25 @@ pub fn loopback_handshake(base_url: &str, options: HandshakeOptions) -> Result<P
     let port = listener.local_addr()?.port();
 
     let state = random_state();
-    let name = options.client_name.unwrap_or_else(default_client_name);
+    let client = options
+        .client
+        .unwrap_or_else(|| "wavekat-platform-client".to_string());
     let callback = format!("http://127.0.0.1:{port}/callback");
 
     let base = base_url.trim_end_matches('/');
-    let url = format!(
-        "{base}/cli-login?callback={cb}&state={st}&name={nm}",
+    let mut url = format!(
+        "{base}/cli-login?callback={cb}&state={st}&client={cl}",
         cb = url_encode(&callback),
         st = url_encode(&state),
-        nm = url_encode(&name),
+        cl = url_encode(&client),
     );
+    if !options.omit_source {
+        let source = options.source.unwrap_or_else(default_source);
+        if !source.is_empty() {
+            url.push_str("&source=");
+            url.push_str(&url_encode(&source));
+        }
+    }
 
     Ok(PendingHandshake {
         listener,
@@ -332,12 +357,11 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-fn default_client_name() -> String {
-    let host = std::env::var("HOSTNAME")
+fn default_source() -> String {
+    std::env::var("HOSTNAME")
         .ok()
         .or_else(|| hostname().ok())
-        .unwrap_or_else(|| "unknown-host".to_string());
-    format!("wavekat-platform-client on {host}")
+        .unwrap_or_else(|| "unknown-host".to_string())
 }
 
 #[cfg(unix)]
@@ -438,16 +462,15 @@ mod tests {
     fn handshake_options_default_has_sensible_timeout() {
         let opts = HandshakeOptions::default();
         assert_eq!(opts.timeout, Duration::from_secs(300));
-        assert!(opts.client_name.is_none());
+        assert!(opts.client.is_none());
+        assert!(opts.source.is_none());
+        assert!(!opts.omit_source);
     }
 
     #[test]
-    fn default_client_name_includes_crate_label() {
-        let name = default_client_name();
-        assert!(
-            name.starts_with("wavekat-platform-client on "),
-            "unexpected client name: {name}",
-        );
+    fn default_source_falls_back_to_a_hostname() {
+        let s = default_source();
+        assert!(!s.is_empty(), "should never produce an empty source");
     }
 
     #[test]
@@ -457,14 +480,50 @@ mod tests {
                 .expect("bind loopback");
         let url = pending.url();
         assert!(url.starts_with("https://platform.wavekat.com/cli-login?"));
-        // url-encoded "http://127.0.0.1:" — the colon survives encoding
-        // (`form_urlencoded` is conservative). We just check the host
-        // and port-prefix appear.
         assert!(url.contains("127.0.0.1"), "{url}");
         assert!(url.contains(&format!(
             "state={}",
             url::form_urlencoded::byte_serialize(pending.state().as_bytes()).collect::<String>()
         )));
+        // Default `client` is the crate name.
+        assert!(
+            url.contains("client=wavekat-platform-client"),
+            "expected client=wavekat-platform-client in {url}",
+        );
+        // Default options send a source (the hostname).
+        assert!(url.contains("&source="), "expected &source=... in {url}");
+    }
+
+    #[test]
+    fn loopback_handshake_uses_explicit_client_and_source() {
+        let pending = loopback_handshake(
+            "https://platform.wavekat.com",
+            HandshakeOptions {
+                client: Some("wavekat-voice".into()),
+                source: Some("studio-mac".into()),
+                ..Default::default()
+            },
+        )
+        .expect("bind loopback");
+        let url = pending.url();
+        assert!(url.contains("client=wavekat-voice"), "{url}");
+        assert!(url.contains("source=studio-mac"), "{url}");
+    }
+
+    #[test]
+    fn loopback_handshake_omits_source_when_requested() {
+        let pending = loopback_handshake(
+            "https://platform.wavekat.com",
+            HandshakeOptions {
+                client: Some("wavekat-voice".into()),
+                omit_source: true,
+                ..Default::default()
+            },
+        )
+        .expect("bind loopback");
+        let url = pending.url();
+        assert!(url.contains("client=wavekat-voice"), "{url}");
+        assert!(!url.contains("source="), "should not include source: {url}");
     }
 
     #[test]
