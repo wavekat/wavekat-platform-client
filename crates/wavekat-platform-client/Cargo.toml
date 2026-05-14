@@ -1,0 +1,21 @@
+[package]
+name = "wavekat-platform-client"
+description = "Rust client for the WaveKat platform — auth, sessions, artifact upload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/wavekat/wavekat-platform-client"
+homepage = "https://github.com/wavekat/wavekat-platform-client"
+documentation = "https://docs.rs/wavekat-platform-client"
+readme = "../../README.md"
+keywords = ["wavekat", "platform", "client", "sdk"]
+categories = ["api-bindings", "web-programming::http-client"]
+exclude = ["CHANGELOG.md"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
