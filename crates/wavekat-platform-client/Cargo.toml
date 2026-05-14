@@ -4,6 +4,7 @@ description = "Rust client for the WaveKat platform — auth, sessions, artifact
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 repository = "https://github.com/wavekat/wavekat-platform-client"
 homepage = "https://github.com/wavekat/wavekat-platform-client"
 documentation = "https://docs.rs/wavekat-platform-client"
@@ -13,8 +14,26 @@ categories = ["api-bindings", "web-programming::http-client"]
 exclude = ["CHANGELOG.md"]
 
 [dependencies]
+# HTTP client. rustls-tls keeps us off OpenSSL across platforms; json + gzip
+# match what wavekat-cli already vetted; stream is needed for get_stream_to.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+rand = "0.8"
+thiserror = "1"
+# `time` for the handshake timeout; `sync` for the oneshot used to hand
+# the token off the blocking accept thread. Deliberately NOT enabling
+# `rt-multi-thread` or `macros` — let the consumer pick the runtime.
+tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
+futures-util = "0.3"
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time", "sync"] }
+# `examples/smoke.rs` is a small CLI-shaped binary for the manual smoke
+# test (see docs/01-initial-port.md). The library itself does not depend
+# on `webbrowser` — the example just uses it for convenience.
+webbrowser = "1"
 
 [package.metadata.docs.rs]
 all-features = true
