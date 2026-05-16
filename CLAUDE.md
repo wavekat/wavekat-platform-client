@@ -10,14 +10,44 @@ Make "talk to the WaveKat platform from Rust" a solved problem so each consumer 
 
 - `Client` — reqwest-backed HTTP client with bearer auth attached.
 - Loopback OAuth handshake (`platform.wavekat.com/cli-login` → loopback `127.0.0.1:<ephemeral>/callback`).
-- Typed wrappers for stable platform endpoints used by multiple consumers (`/api/me`, token revoke, artifact upload).
+- Typed wrappers for stable platform endpoints (`/api/me`, token revoke, artifact upload).
+- **Platform sync endpoints** that upload/read user-owned resources. See "Platform sync endpoints belong here" below.
 - Error types covering network, deserialization, auth-state mismatches.
+
+## Platform sync endpoints belong here
+
+Any endpoint pair under `/api/voice/{resource}/{sync,list}` — or any
+future equivalent that uploads a user-owned resource from a client to
+the platform and reads it back — is implemented in this crate as a
+`SyncEndpoint` marker, **even if only one consumer uses it today**.
+
+Reason: every WaveKat client (desktop daemon, CLI, future agents)
+ships against the same platform. Making each consumer reinvent the
+upload pipeline (batching, retries, cursor pagination, error mapping)
+guarantees drift — subtly different batch sizes, different envelope
+shapes, different idempotency keys. The bridge crate exists to stop
+that.
+
+Concretely: when you add a new sync-able resource (calls today;
+recordings, transcripts, summaries later), you land:
+
+- A `SyncEndpoint` impl on a zero-sized marker type (`VoiceCalls`,
+  `VoiceRecordings`, …).
+- The wire-shape `Record` + `Query` types alongside it.
+- The platform-side migration + routes in `wavekat-platform`.
+
+Consumers then call `client.sync::<VoiceCalls>(items)` /
+`client.list::<VoiceCalls>(query)` — they don't write a new HTTP
+pipeline.
+
+Design rationale and the calls-first slice that established the
+pattern: see [`wavekat-voice/docs/21-platform-call-history-sync.md`](https://github.com/wavekat/wavekat-voice/blob/main/docs/21-platform-call-history-sync.md).
 
 ## What does NOT belong here
 
 - **Credential storage policy.** Consumers pick: `wavekat-cli` writes a JSON file at `~/.config/wavekat/auth.json`; `wavekat-voice` uses the OS keychain via the `keyring` crate. The crate's surface takes a `token: String` and returns one — it never reads or writes disk.
 - **CLI-shaped concerns.** Argument parsing, terminal rendering, progress bars, anything `clap`/`unicode-width` shaped. Those stay in `wavekat-cli`.
-- **Consumer-specific endpoints.** If only one product calls it, it stays in that product. Promote to this crate when a second consumer needs it.
+- **Truly one-off endpoints.** Things one client genuinely needs and no other client ever will — a CLI-only `wk doctor` debug dump, the desktop-only loopback OAuth callback handler, etc. Sync endpoints are *not* in this bucket: default to landing them here unless you can articulate why no other client will ever want them.
 - **Async runtime.** Use `reqwest` async; let consumers bring tokio.
 
 ## Design principles

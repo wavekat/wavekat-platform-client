@@ -40,10 +40,17 @@ mod client;
 mod error;
 mod me;
 mod oauth;
+mod sync;
 mod token;
+mod voice;
 
 pub use client::Client;
 pub use error::{Error, Result};
 pub use me::Me;
 pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
+pub use sync::{Page, SyncEndpoint, SyncRequest, SyncResponse};
 pub use token::Token;
+pub use voice::{
+    VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls,
+    VoiceCallsQuery,
+};
