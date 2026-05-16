@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::sync::SyncEndpoint;
+use crate::sync::{HasSyncEnvelope, SyncEndpoint, SyncEnvelope};
 
 /// Inbound vs. outbound. Wire-stable snake_case strings — never
 /// renumber or rename. New states (e.g. `internal`) would be a wire
@@ -95,6 +95,13 @@ pub struct VoiceCallRecord {
     /// Free-text error, populated only when `disposition == Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Version + forward-compat fields shared by every sync record.
+    /// Flattened so `schemaVersion` and `extras` sit at the top of
+    /// the JSON object alongside the other columns. See
+    /// [`SyncEnvelope`] and doc 21 §"Versioning and forward
+    /// compatibility".
+    #[serde(flatten, default)]
+    pub envelope: SyncEnvelope,
 }
 
 /// Query params for `GET /api/voice/calls`. All fields optional — the
@@ -121,6 +128,12 @@ impl SyncEndpoint for VoiceCalls {
     type Query = VoiceCallsQuery;
 }
 
+impl HasSyncEnvelope for VoiceCallRecord {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope {
+        &mut self.envelope
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +152,7 @@ mod tests {
             disposition: VoiceCallDisposition::Answered,
             end_reason: VoiceCallEndReason::HangupRemote,
             error: None,
+            envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"sourceId\":"), "{s}");
@@ -148,6 +162,16 @@ mod tests {
         assert!(s.contains("\"durationMs\":55000"), "{s}");
         // Optional `error` is None — should be omitted from the wire.
         assert!(!s.contains("\"error\""), "error should be omitted: {s}");
+        // Envelope flattens to the top of the object — schemaVersion
+        // sits next to the other fields rather than nested under
+        // "envelope". Future resources rely on this layout.
+        assert!(
+            s.contains("\"schemaVersion\":1"),
+            "schemaVersion should flatten: {s}"
+        );
+        // `extras` is None, so the envelope contributes no `extras`
+        // key. Stays out of the row to keep the small/fast path.
+        assert!(!s.contains("\"extras\""), "extras should be omitted: {s}");
     }
 
     #[test]
@@ -221,5 +245,30 @@ mod tests {
     #[test]
     fn voice_calls_marker_resource_is_calls() {
         assert_eq!(<VoiceCalls as SyncEndpoint>::RESOURCE, "calls");
+    }
+
+    #[test]
+    fn record_accepts_unknown_extras_for_forward_compat() {
+        // A newer client shipping a `notes` field that this platform
+        // version doesn't have a column for should round-trip via
+        // the `extras` envelope. The platform persists the blob
+        // verbatim; a future deploy can promote it to a typed
+        // column without data loss.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "anon",
+            "ringAt": "2026-05-16T10:00:00Z",
+            "endAt": "2026-05-16T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_remote",
+            "schemaVersion": 2,
+            "extras": { "notes": "from staging build" }
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.envelope.schema_version, Some(2));
+        let extras = parsed.envelope.extras.as_ref().expect("extras present");
+        assert_eq!(extras["notes"], "from staging build");
     }
 }

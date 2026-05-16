@@ -16,9 +16,86 @@
 //! full design rationale and the wire contract.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::client::Client;
 use crate::error::Result;
+
+/// Wire-level envelope that every sync record carries.
+///
+/// Embedded in each `SyncEndpoint::Record` via `#[serde(flatten)]`
+/// so the two fields end up at the top of the JSON object alongside
+/// the resource-specific columns. Lets the version-skew story live
+/// in one place — not duplicated on every resource type.
+///
+/// **`schema_version`**: which wire shape the daemon wrote this row
+/// with. `None` on the wire means "I'm not declaring one; treat as
+/// `1`." `Client::sync` fills this in from
+/// [`SyncEndpoint::CURRENT_SCHEMA_VERSION`] when a consumer leaves
+/// it [`None`].
+///
+/// **`extras`**: free-form JSON map for fields the consumer's
+/// schema version recognises but the platform's doesn't yet. The
+/// platform persists `extras` verbatim so a future deploy can
+/// promote a field out of it into a typed column without data loss.
+/// The platform deliberately does *not* echo `extras` back on GET —
+/// it's an internal-storage construct, not a public field.
+///
+/// Both fields are optional in serialization so a row that ships
+/// neither stays on the small/fast path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extras: Option<JsonValue>,
+}
+
+impl SyncEnvelope {
+    /// Build an envelope stamped with the endpoint's
+    /// `CURRENT_SCHEMA_VERSION`. Useful for daemon-side code that
+    /// wants to construct a record with the version already filled
+    /// in — `Client::sync` will also fill it in lazily, but doing it
+    /// at construction time keeps tests and logs honest.
+    pub fn for_endpoint<E: SyncEndpoint + ?Sized>() -> Self {
+        Self {
+            schema_version: Some(E::CURRENT_SCHEMA_VERSION),
+            extras: None,
+        }
+    }
+}
+
+/// Records that carry a [`SyncEnvelope`] expose it via this trait so
+/// the bridge crate can stamp the `schemaVersion` field uniformly
+/// across resources. One-line impl per record type:
+///
+/// ```ignore
+/// impl HasSyncEnvelope for VoiceCallRecord {
+///     fn envelope_mut(&mut self) -> &mut SyncEnvelope { &mut self.envelope }
+/// }
+/// ```
+pub trait HasSyncEnvelope {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope;
+}
+
+/// Clone `items` and fill in `schemaVersion` on every record whose
+/// envelope left it unset. Records that supplied an explicit version
+/// are passed through unchanged — useful for tests and for the rare
+/// "deliberately ship an older version during a rollback" case.
+fn stamp_schema_version<E: SyncEndpoint>(items: &[E::Record]) -> Vec<E::Record>
+where
+    E::Record: Clone + HasSyncEnvelope,
+{
+    let mut out = items.to_vec();
+    for item in &mut out {
+        let env = item.envelope_mut();
+        if env.schema_version.is_none() {
+            env.schema_version = Some(E::CURRENT_SCHEMA_VERSION);
+        }
+    }
+    out
+}
 
 /// One sync-able platform resource.
 ///
@@ -33,9 +110,32 @@ pub trait SyncEndpoint {
     /// `GET  /api/voice/{RESOURCE}`.
     const RESOURCE: &'static str;
 
+    /// Current wire-schema version for this resource's `Record` type.
+    ///
+    /// Bumped when the meaning of an existing field changes (a rare,
+    /// deliberate event). Additive field changes don't require a
+    /// version bump — they ride on the additive-only policy
+    /// (see `wavekat-voice/docs/21-platform-call-history-sync.md`
+    /// §"Versioning and forward compatibility").
+    ///
+    /// Used by `Client::sync` so consumers don't manage the version
+    /// themselves — upgrading the bridge crate picks up the right
+    /// number automatically. Default is `1`.
+    const CURRENT_SCHEMA_VERSION: u32 = 1;
+
     /// One row's worth of data. Must round-trip through JSON; the wire
     /// shape uses camelCase per the platform's Hono/Zod convention
     /// (apply `#[serde(rename_all = "camelCase")]` on your struct).
+    ///
+    /// Records must embed [`SyncEnvelope`] via
+    /// `#[serde(flatten)] pub envelope: SyncEnvelope` so the
+    /// `schemaVersion` + `extras` fields appear at the top of the
+    /// JSON object alongside the resource-specific columns. The
+    /// trait doesn't enforce this via an associated type because
+    /// `#[serde(flatten)]` is a serde attribute (not a Rust trait
+    /// bound), but every record type ships with the envelope and
+    /// `Client::sync` relies on the field name `schemaVersion`.
+    /// See `VoiceCallRecord` for the canonical shape.
     type Record: Serialize + DeserializeOwned + Send + Sync + 'static;
 
     /// Query params for `GET /api/voice/{RESOURCE}`. Typically a cursor
@@ -92,13 +192,20 @@ impl Client {
     /// HTTP 413. This method does *not* chunk for you — pass a slice
     /// you're confident about, or use the daemon's `Uploader<E>` which
     /// chunks at 50.
+    ///
+    /// **Schema version.** Records whose envelope leaves
+    /// `schemaVersion` unset (the common case — consumers don't need
+    /// to know the number) have it stamped with
+    /// [`SyncEndpoint::CURRENT_SCHEMA_VERSION`] before serialization,
+    /// so the platform always sees an explicit version. Records that
+    /// set it explicitly are passed through untouched.
     pub async fn sync<E: SyncEndpoint>(&self, items: &[E::Record]) -> Result<SyncResponse>
     where
-        E::Record: Clone,
+        E::Record: Clone + HasSyncEnvelope,
     {
         let path = format!("/api/voice/{}/sync", E::RESOURCE);
         let body = SyncRequest {
-            items: items.to_vec(),
+            items: stamp_schema_version::<E>(items),
         };
         self.post_json::<SyncResponse, _>(&path, &body).await
     }
@@ -186,5 +293,63 @@ mod tests {
     fn resource_const_drives_path() {
         // Sanity check — the trait constant is what ends up in the URL.
         assert_eq!(<DummyResource as SyncEndpoint>::RESOURCE, "dummy");
+    }
+
+    // A record that carries the envelope via flatten — exactly the
+    // shape every real resource type adopts. Verifies the
+    // stamp-on-send behaviour without depending on `VoiceCalls`
+    // (which lives in a sibling module).
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DummyEnvelopedRecord {
+        source_id: String,
+        #[serde(flatten, default)]
+        envelope: SyncEnvelope,
+    }
+
+    impl HasSyncEnvelope for DummyEnvelopedRecord {
+        fn envelope_mut(&mut self) -> &mut SyncEnvelope {
+            &mut self.envelope
+        }
+    }
+
+    struct EnvelopedResource;
+    impl SyncEndpoint for EnvelopedResource {
+        const RESOURCE: &'static str = "enveloped";
+        const CURRENT_SCHEMA_VERSION: u32 = 7;
+        type Record = DummyEnvelopedRecord;
+        type Query = DummyQuery;
+    }
+
+    #[test]
+    fn stamp_schema_version_fills_in_when_missing() {
+        let items = vec![DummyEnvelopedRecord {
+            source_id: "a".into(),
+            envelope: SyncEnvelope::default(),
+        }];
+        let stamped = stamp_schema_version::<EnvelopedResource>(&items);
+        assert_eq!(stamped[0].envelope.schema_version, Some(7));
+    }
+
+    #[test]
+    fn stamp_schema_version_preserves_explicit_value() {
+        // A consumer that deliberately set a version (e.g. a rollback
+        // test) should pass through unchanged.
+        let items = vec![DummyEnvelopedRecord {
+            source_id: "a".into(),
+            envelope: SyncEnvelope {
+                schema_version: Some(2),
+                extras: None,
+            },
+        }];
+        let stamped = stamp_schema_version::<EnvelopedResource>(&items);
+        assert_eq!(stamped[0].envelope.schema_version, Some(2));
+    }
+
+    #[test]
+    fn for_endpoint_returns_envelope_with_current_version() {
+        let env = SyncEnvelope::for_endpoint::<EnvelopedResource>();
+        assert_eq!(env.schema_version, Some(7));
+        assert!(env.extras.is_none());
     }
 }

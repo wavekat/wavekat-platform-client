@@ -48,7 +48,7 @@ pub use client::Client;
 pub use error::{Error, Result};
 pub use me::Me;
 pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
-pub use sync::{Page, SyncEndpoint, SyncRequest, SyncResponse};
+pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
     VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls,

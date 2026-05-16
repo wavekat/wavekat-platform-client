@@ -40,6 +40,46 @@ Consumers then call `client.sync::<VoiceCalls>(items)` /
 `client.list::<VoiceCalls>(query)` — they don't write a new HTTP
 pipeline.
 
+### Every record carries a `SyncEnvelope`
+
+Each `SyncEndpoint::Record` type embeds `SyncEnvelope` via
+`#[serde(flatten)]` and implements `HasSyncEnvelope`:
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyResourceRecord {
+    /* resource-specific fields */
+
+    #[serde(flatten, default)]
+    pub envelope: SyncEnvelope,
+}
+
+impl HasSyncEnvelope for MyResourceRecord {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope { &mut self.envelope }
+}
+```
+
+The envelope contributes two fields to the wire:
+
+- `schemaVersion` — auto-stamped by `Client::sync` from
+  `SyncEndpoint::CURRENT_SCHEMA_VERSION` when the consumer leaves
+  it `None`. Lets the platform branch on which client wrote the
+  row when an additive field change isn't enough.
+- `extras` — free-form JSON for fields a newer client knows about
+  but this platform version doesn't yet have a typed column for.
+  The platform persists `extras` verbatim so a future deploy can
+  promote a field out of it into a typed column without data loss.
+
+### Wire schemas are additive-only
+
+When you add a field to a `Record`, make it optional with a serde
+default (`#[serde(default, skip_serializing_if = "Option::is_none")]`
+on `Option<…>`). When you remove one, deprecate first, ignore for a
+release, then drop. When the *meaning* of a field needs to change,
+introduce a new name and bump `CURRENT_SCHEMA_VERSION`. Hard schema
+breaks ship as a new endpoint pair under a new `RESOURCE` segment.
+
 Design rationale and the calls-first slice that established the
 pattern: see [`wavekat-voice/docs/21-platform-call-history-sync.md`](https://github.com/wavekat/wavekat-voice/blob/main/docs/21-platform-call-history-sync.md).
 
