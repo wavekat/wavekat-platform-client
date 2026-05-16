@@ -10,7 +10,16 @@ use std::time::Duration;
 /// All errors surfaced by the crate.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The platform returned a non-2xx status. `body` is truncated to a
+    /// The platform returned 401. Split out from [`Error::Http`] so
+    /// consumers can render a tailored "sign in again" message instead
+    /// of the raw response body — the right remedy is almost always
+    /// "mint a fresh token", and the body alone (`{"error":"unauthenticated"}`)
+    /// doesn't tell the user that.
+    #[error("HTTP 401 {url}: {body}")]
+    Unauthorized { url: String, body: String },
+
+    /// The platform returned a non-2xx status (other than 401, which has
+    /// its own [`Error::Unauthorized`] variant). `body` is truncated to a
     /// reasonable size before being attached.
     #[error("HTTP {status} {url}: {body}")]
     Http {
