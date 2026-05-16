@@ -160,11 +160,7 @@ impl Client {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Http {
-                status: status.as_u16(),
-                url,
-                body: truncate(&body, 500).to_string(),
-            });
+            return Err(http_error(status.as_u16(), url, body));
         }
         let mut stream = resp.bytes_stream();
         let mut written: u64 = 0;
@@ -182,11 +178,7 @@ async fn decode<T: DeserializeOwned>(url: String, resp: reqwest::Response) -> Re
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(Error::Http {
-            status: status.as_u16(),
-            url,
-            body: truncate(&text, 500).to_string(),
-        });
+        return Err(http_error(status.as_u16(), url, text));
     }
     serde_json::from_str(&text).map_err(|source| Error::Decode { url, source })
 }
@@ -197,11 +189,20 @@ async fn ensure_success(url: String, resp: reqwest::Response) -> Result<()> {
         return Ok(());
     }
     let body = resp.text().await.unwrap_or_default();
-    Err(Error::Http {
-        status: status.as_u16(),
-        url,
-        body: truncate(&body, 500).to_string(),
-    })
+    Err(http_error(status.as_u16(), url, body))
+}
+
+/// Map an HTTP error response to the matching [`Error`] variant. 401
+/// gets its own [`Error::Unauthorized`] so consumers can render a
+/// tailored "sign in again" message; everything else stays as
+/// [`Error::Http`].
+fn http_error(status: u16, url: String, body: String) -> Error {
+    let body = truncate(&body, 500).to_string();
+    if status == 401 {
+        Error::Unauthorized { url, body }
+    } else {
+        Error::Http { status, url, body }
+    }
 }
 
 fn truncate(s: &str, n: usize) -> &str {
@@ -231,14 +232,46 @@ mod tests {
         // produced via `anyhow!`. Consumers (and grep-driven debugging)
         // depend on the shape.
         let e = Error::Http {
-            status: 401,
+            status: 500,
             url: "https://platform.wavekat.com/api/me".into(),
-            body: "unauthorized".into(),
+            body: "boom".into(),
         };
+        let s = e.to_string();
+        assert!(s.contains("500"), "{s}");
+        assert!(s.contains("https://platform.wavekat.com/api/me"), "{s}");
+        assert!(s.contains("boom"), "{s}");
+    }
+
+    #[test]
+    fn http_error_splits_401_into_unauthorized() {
+        // 401 routes to the dedicated variant so consumers can match on
+        // it instead of inspecting `status == 401`.
+        let e = http_error(
+            401,
+            "https://platform.wavekat.com/api/me".into(),
+            "{\"error\":\"unauthenticated\"}".into(),
+        );
+        assert!(
+            matches!(e, Error::Unauthorized { .. }),
+            "expected Unauthorized, got {e:?}"
+        );
+        // Display still mentions 401 + url so logs stay greppable.
         let s = e.to_string();
         assert!(s.contains("401"), "{s}");
         assert!(s.contains("https://platform.wavekat.com/api/me"), "{s}");
-        assert!(s.contains("unauthorized"), "{s}");
+    }
+
+    #[test]
+    fn http_error_keeps_non_401_in_http_variant() {
+        let e = http_error(
+            500,
+            "https://platform.wavekat.com/api/me".into(),
+            "boom".into(),
+        );
+        assert!(
+            matches!(e, Error::Http { status: 500, .. }),
+            "expected Http {{ status: 500 }}, got {e:?}"
+        );
     }
 
     #[test]
