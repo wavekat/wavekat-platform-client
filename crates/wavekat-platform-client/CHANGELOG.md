@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.3...v0.0.4) - 2026-05-16
+
+### Added
+
+- add SyncEndpoint trait + VoiceCalls marker ([#6](https://github.com/wavekat/wavekat-platform-client/pull/6))
+
 ## [0.0.3](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.2...v0.0.3) - 2026-05-16
 
 ### Added
