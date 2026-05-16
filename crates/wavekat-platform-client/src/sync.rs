@@ -107,7 +107,8 @@ impl Client {
     /// newest first, scoped server-side to the bearer's user.
     pub async fn list<E: SyncEndpoint>(&self, query: &E::Query) -> Result<Page<E::Record>> {
         let path = format!("/api/voice/{}", E::RESOURCE);
-        self.get_json_query::<Page<E::Record>, _>(&path, query).await
+        self.get_json_query::<Page<E::Record>, _>(&path, query)
+            .await
     }
 }
 
@@ -155,7 +156,10 @@ mod tests {
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains("\"items\":["), "missing items envelope: {s}");
-        assert!(s.contains("\"sourceId\":\"a\""), "wire should be camelCase: {s}");
+        assert!(
+            s.contains("\"sourceId\":\"a\""),
+            "wire should be camelCase: {s}"
+        );
     }
 
     #[test]

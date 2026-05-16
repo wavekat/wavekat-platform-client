@@ -176,7 +176,10 @@ mod tests {
         let q = VoiceCallsQuery::default();
         let s = serde_json::to_string(&q).unwrap();
         // Empty object — every field skipped when None.
-        assert_eq!(s, "{}", "default query should serialize to empty object: {s}");
+        assert_eq!(
+            s, "{}",
+            "default query should serialize to empty object: {s}"
+        );
     }
 
     #[test]
