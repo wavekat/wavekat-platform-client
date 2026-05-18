@@ -123,11 +123,25 @@ impl Client {
     /// the CLI's `models push` to ship bytes through the platform's
     /// proxy upload route when R2 isn't directly reachable.
     pub async fn put_proxy_bytes(&self, path: &str, body: Vec<u8>) -> Result<()> {
+        self.put_raw_bytes(path, "application/octet-stream", body)
+            .await
+    }
+
+    /// `PUT {path}` with `body` and a caller-chosen content type. The
+    /// bearer's auth header rides along (per the default-headers map),
+    /// so this is for routes on the platform itself — not for
+    /// presigned R2 PUTs. Voice recording bytes go through here.
+    pub async fn put_raw_bytes(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<()> {
         let url = self.url(path);
         let resp = self
             .inner
             .put(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(body)
             .send()
             .await?;

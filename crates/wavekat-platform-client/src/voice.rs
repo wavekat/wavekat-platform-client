@@ -13,7 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::sync::{HasSyncEnvelope, SyncEndpoint, SyncEnvelope};
+use crate::client::Client;
+use crate::error::{Error, Result};
+use crate::sync::{stamp_schema_version, HasSyncEnvelope, SyncEndpoint, SyncEnvelope, SyncRequest};
 
 /// Inbound vs. outbound. Wire-stable snake_case strings — never
 /// renumber or rename. New states (e.g. `internal`) would be a wire
@@ -131,6 +133,213 @@ impl SyncEndpoint for VoiceCalls {
 impl HasSyncEnvelope for VoiceCallRecord {
     fn envelope_mut(&mut self) -> &mut SyncEnvelope {
         &mut self.envelope
+    }
+}
+
+// ---- VoiceRecordings ------------------------------------------------------
+
+/// One per-call recording's metadata as it crosses the wire from the
+/// daemon up to the platform. The WAV bytes ride on a separate
+/// follow-up call ([`Client::upload_recording_bytes`]) so the
+/// idempotent metadata sync stays small and a flaky bytes upload
+/// doesn't force the daemon to re-ship the row.
+///
+/// Mirrors the daemon's `RecordingArtifact` (see
+/// `wavekat-voice/crates/wavekat-voice/src/recording.rs`) with one
+/// rename: the daemon's local id (`id`) ships as `source_id` because
+/// the platform allocates its own row id and treats the daemon-side
+/// UUID as the idempotency key (same convention as
+/// [`VoiceCallRecord`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRecordingRecord {
+    /// Daemon-generated UUID for this recording artifact. Upsert key
+    /// on the platform side.
+    pub source_id: String,
+    /// Daemon's `calls.id` — the call this recording belongs to.
+    /// The platform stores both so the /voice/calls history page can
+    /// link a call to its recording without a separate join table.
+    pub call_source_id: String,
+    /// Byte length of the WAV file the daemon will PUT in the follow-
+    /// up bytes call. The platform refuses a PUT whose body length
+    /// disagrees.
+    pub size_bytes: u64,
+    pub duration_ms: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// RFC 3339 timestamp the daemon stamped on the artifact at
+    /// finalize time. Drives the platform's `/voice/recordings` GET
+    /// cursor.
+    pub created_at: String,
+    #[serde(flatten, default)]
+    pub envelope: SyncEnvelope,
+}
+
+/// Query params for `GET /api/voice/recordings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRecordingsQuery {
+    /// RFC 3339 cursor; rows with `created_at < before` are returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Marker for the `/api/voice/recordings/{sync,list}` endpoint pair.
+///
+/// The corresponding bytes-upload endpoint
+/// (`PUT /api/voice/recordings/{sourceId}/bytes`) is invoked via
+/// [`Client::upload_recording_bytes`] — it doesn't fit the
+/// `SyncEndpoint` mold (no batch, no JSON body) so it has its own
+/// inherent method on `Client`.
+pub struct VoiceRecordings;
+
+impl SyncEndpoint for VoiceRecordings {
+    const RESOURCE: &'static str = "recordings";
+    type Record = VoiceRecordingRecord;
+    type Query = VoiceRecordingsQuery;
+}
+
+impl HasSyncEnvelope for VoiceRecordingRecord {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope {
+        &mut self.envelope
+    }
+}
+
+/// One item in the platform's response to
+/// `POST /api/voice/recordings/sync`. Lets the daemon learn the R2
+/// key the platform stamped (so a subsequent bytes PUT can target it)
+/// without re-deriving it, and check whether bytes have already
+/// landed on a prior cycle (so the daemon can mark the local row
+/// synced without re-uploading the WAV).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRecordingSyncItem {
+    pub source_id: String,
+    pub r2_key: String,
+    pub bytes_uploaded: bool,
+}
+
+/// Full response from `POST /api/voice/recordings/sync`. Superset of
+/// the generic [`crate::SyncResponse`] — see [`Client::sync_recordings`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceRecordingsSyncResponse {
+    pub accepted: u32,
+    pub skipped: u32,
+    pub items: Vec<VoiceRecordingSyncItem>,
+}
+
+// ---- VoiceTranscripts -----------------------------------------------------
+
+/// Wire-stable transcript channel tag. Matches the daemon's
+/// `TranscriptChannelLabel` and `events::TranscriptChannel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceTranscriptChannel {
+    /// Local mic audio — what the user said.
+    Local,
+    /// Received RTP audio — what the remote party said.
+    Remote,
+}
+
+/// One ASR transcript segment ("final" in wavekat-asr parlance) as it
+/// crosses the wire. Each segment is a row on the daemon side
+/// (`transcripts` table); the daemon batches a slice of them per
+/// upload and the platform upserts per (user_id, source_id).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceTranscriptRecord {
+    /// Daemon-side row id, formatted as text (the column is an
+    /// autoincrement integer on SQLite). Stable per (call, segment)
+    /// so re-shipping converges.
+    pub source_id: String,
+    /// Daemon's `calls.id` — the call this segment belongs to.
+    pub call_source_id: String,
+    pub channel: VoiceTranscriptChannel,
+    /// Start of the segment in milliseconds relative to the start of
+    /// the call's audio stream (not wall-clock).
+    pub ts_ms: i64,
+    /// End of the segment, same reference frame as `ts_ms`.
+    pub end_ms: i64,
+    /// Recognised text. Free-form; the platform stores it verbatim.
+    pub text: String,
+    #[serde(flatten, default)]
+    pub envelope: SyncEnvelope,
+}
+
+/// Query params for `GET /api/voice/transcripts` — required
+/// `call_source_id` (the endpoint refuses a flat list).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceTranscriptsQuery {
+    pub call_source_id: String,
+}
+
+/// Marker for the `/api/voice/transcripts/{sync,list}` endpoint pair.
+pub struct VoiceTranscripts;
+
+impl SyncEndpoint for VoiceTranscripts {
+    const RESOURCE: &'static str = "transcripts";
+    type Record = VoiceTranscriptRecord;
+    type Query = VoiceTranscriptsQuery;
+}
+
+impl HasSyncEnvelope for VoiceTranscriptRecord {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope {
+        &mut self.envelope
+    }
+}
+
+// ---- Client surface for recordings ----------------------------------------
+//
+// Recordings don't fit the generic `Client::sync` shape cleanly:
+//
+//   - the response carries per-item provenance (the platform-stamped
+//     `r2Key`, plus whether bytes have already landed) that the
+//     daemon needs in order to decide which rows still owe a PUT;
+//   - the bytes upload is its own HTTP call (`PUT
+//     /api/voice/recordings/{sourceId}/bytes`), not a JSON batch.
+//
+// Rather than overloading `SyncEndpoint` to carry these shapes, we
+// expose two inherent methods on `Client` that compose the existing
+// JSON / bytes-PUT primitives.
+
+impl Client {
+    /// `POST /api/voice/recordings/sync` — idempotent batch upsert of
+    /// recording metadata. Returns the per-item `r2Key` the daemon
+    /// should target for the follow-up bytes PUT, and whether bytes
+    /// have already landed for each row.
+    ///
+    /// Batch sizing rules match [`Client::sync`]: the platform rejects
+    /// batches over 100 items; the daemon's uploader chunks at 50.
+    pub async fn sync_recordings(
+        &self,
+        items: &[VoiceRecordingRecord],
+    ) -> Result<VoiceRecordingsSyncResponse> {
+        let stamped = stamp_schema_version::<VoiceRecordings>(items);
+        let body = SyncRequest { items: stamped };
+        self.post_json::<VoiceRecordingsSyncResponse, _>("/api/voice/recordings/sync", &body)
+            .await
+    }
+
+    /// `PUT /api/voice/recordings/{sourceId}/bytes` — upload the WAV
+    /// bytes for a recording whose metadata was previously synced via
+    /// [`Client::sync_recordings`]. The platform refuses (`HTTP 413`)
+    /// if `bytes.len()` disagrees with the synced `sizeBytes`.
+    ///
+    /// `source_id` is path-segmented as-is; callers pass the
+    /// daemon-side UUID they used for the metadata sync. Empty /
+    /// path-traversal-shaped ids are not specifically guarded here —
+    /// the platform's Zod schema rejects them server-side, so a
+    /// malformed id surfaces as a 4xx via [`Error::Http`].
+    pub async fn upload_recording_bytes(&self, source_id: &str, bytes: Vec<u8>) -> Result<()> {
+        if source_id.is_empty() {
+            return Err(Error::BadRequest("source_id must not be empty".into()));
+        }
+        let path = format!("/api/voice/recordings/{source_id}/bytes");
+        self.put_raw_bytes(&path, "audio/wav", bytes).await
     }
 }
 
@@ -270,5 +479,88 @@ mod tests {
         assert_eq!(parsed.envelope.schema_version, Some(2));
         let extras = parsed.envelope.extras.as_ref().expect("extras present");
         assert_eq!(extras["notes"], "from staging build");
+    }
+
+    #[test]
+    fn recording_marker_resource_is_recordings() {
+        // Path constant drives the URL in `Client::sync_recordings`;
+        // a rename here would silently 404 against the platform.
+        assert_eq!(<VoiceRecordings as SyncEndpoint>::RESOURCE, "recordings");
+    }
+
+    #[test]
+    fn recording_record_serializes_with_camel_case_and_envelope() {
+        let r = VoiceRecordingRecord {
+            source_id: "11111111-1111-4111-8111-111111111111".into(),
+            call_source_id: "22222222-2222-4222-8222-222222222222".into(),
+            size_bytes: 44 + 64_000,
+            duration_ms: 2_000,
+            sample_rate: 8_000,
+            channels: 2,
+            created_at: "2026-05-16T10:01:05Z".into(),
+            envelope: SyncEnvelope::for_endpoint::<VoiceRecordings>(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        // Field-by-field wire contract — these strings are also what
+        // the platform's Zod schema expects.
+        assert!(s.contains("\"sourceId\":"), "{s}");
+        assert!(s.contains("\"callSourceId\":"), "{s}");
+        assert!(s.contains("\"sizeBytes\":64044"), "{s}");
+        assert!(s.contains("\"durationMs\":2000"), "{s}");
+        assert!(s.contains("\"sampleRate\":8000"), "{s}");
+        assert!(s.contains("\"channels\":2"), "{s}");
+        assert!(s.contains("\"createdAt\":"), "{s}");
+        // Envelope flattens to the top of the object, same as VoiceCallRecord.
+        assert!(s.contains("\"schemaVersion\":1"), "{s}");
+    }
+
+    #[test]
+    fn recordings_sync_response_round_trips() {
+        // The richer-than-generic response carries per-item provenance —
+        // the daemon's uploader reads `r2Key` for the bytes follow-up
+        // and `bytesUploaded` to short-circuit when the row already
+        // landed on a previous cycle.
+        let raw = r#"{
+            "accepted": 2,
+            "skipped": 0,
+            "items": [
+                {"sourceId": "a", "r2Key": "voice/recordings/1/a.wav", "bytesUploaded": false},
+                {"sourceId": "b", "r2Key": "voice/recordings/1/b.wav", "bytesUploaded": true}
+            ]
+        }"#;
+        let parsed: VoiceRecordingsSyncResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.accepted, 2);
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.items[0].r2_key, "voice/recordings/1/a.wav");
+        assert!(!parsed.items[0].bytes_uploaded);
+        assert!(parsed.items[1].bytes_uploaded);
+    }
+
+    #[test]
+    fn transcripts_marker_resource_is_transcripts() {
+        assert_eq!(<VoiceTranscripts as SyncEndpoint>::RESOURCE, "transcripts");
+    }
+
+    #[test]
+    fn transcript_record_serializes_with_camel_case_and_channel_enum() {
+        let r = VoiceTranscriptRecord {
+            source_id: "1".into(),
+            call_source_id: "22222222-2222-4222-8222-222222222222".into(),
+            channel: VoiceTranscriptChannel::Remote,
+            ts_ms: 100,
+            end_ms: 1_500,
+            text: "hello".into(),
+            envelope: SyncEnvelope::for_endpoint::<VoiceTranscripts>(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"sourceId\":"), "{s}");
+        assert!(s.contains("\"callSourceId\":"), "{s}");
+        // The channel enum is wire-stable snake_case — matches the
+        // platform's Zod `enum(VOICE_TRANSCRIPT_CHANNELS)`.
+        assert!(s.contains("\"channel\":\"remote\""), "{s}");
+        assert!(s.contains("\"tsMs\":100"), "{s}");
+        assert!(s.contains("\"endMs\":1500"), "{s}");
+        assert!(s.contains("\"text\":\"hello\""), "{s}");
+        assert!(s.contains("\"schemaVersion\":1"), "{s}");
     }
 }
