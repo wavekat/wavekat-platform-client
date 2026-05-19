@@ -131,12 +131,7 @@ impl Client {
     /// bearer's auth header rides along (per the default-headers map),
     /// so this is for routes on the platform itself — not for
     /// presigned R2 PUTs. Voice recording bytes go through here.
-    pub async fn put_raw_bytes(
-        &self,
-        path: &str,
-        content_type: &str,
-        body: Vec<u8>,
-    ) -> Result<()> {
+    pub async fn put_raw_bytes(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<()> {
         let url = self.url(path);
         let resp = self
             .inner
