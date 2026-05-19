@@ -83,7 +83,7 @@ pub trait HasSyncEnvelope {
 /// envelope left it unset. Records that supplied an explicit version
 /// are passed through unchanged — useful for tests and for the rare
 /// "deliberately ship an older version during a rollback" case.
-fn stamp_schema_version<E: SyncEndpoint>(items: &[E::Record]) -> Vec<E::Record>
+pub(crate) fn stamp_schema_version<E: SyncEndpoint>(items: &[E::Record]) -> Vec<E::Record>
 where
     E::Record: Clone + HasSyncEnvelope,
 {

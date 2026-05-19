@@ -52,5 +52,7 @@ pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, S
 pub use token::Token;
 pub use voice::{
     VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls,
-    VoiceCallsQuery,
+    VoiceCallsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings,
+    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
+    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
 };
