@@ -385,11 +385,19 @@ impl Client {
     /// unauthenticated — there's no token, and at first run there's no
     /// signed-in `Client` to hang it off of.
     ///
+    /// Though unauthenticated, the request is **HMAC-signed** with
+    /// `signing_key` (a per-build shared secret the consumer injects at
+    /// compile time) so the platform can reject forged or replayed pings
+    /// — see [`Client::post_public_signed_json`] and [`crate::sign`]. The
+    /// platform must hold the same secret; rotate by configuring the
+    /// platform with both the old and new key across a release.
+    ///
     /// `base_url` is the platform base (e.g. `https://platform.wavekat.com`).
     pub async fn install_heartbeat(
         base_url: &str,
         install_id: &str,
         app_version: &str,
+        signing_key: &str,
     ) -> Result<InstallHeartbeatResponse> {
         let sys = SystemInfo::detect();
         let body = InstallHeartbeatRequest {
@@ -400,10 +408,11 @@ impl Client {
             arch: Some(sys.arch),
             locale: sys.locale,
         };
-        Client::post_public_json::<InstallHeartbeatResponse, _>(
+        Client::post_public_signed_json::<InstallHeartbeatResponse, _>(
             base_url,
             "/api/voice/installs/heartbeat",
             &body,
+            signing_key,
         )
         .await
     }

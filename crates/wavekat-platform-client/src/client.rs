@@ -13,12 +13,13 @@
 //! mechanical.
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{Error, Result};
+use crate::sign;
 use crate::token::Token;
 
 /// HTTP client with the bearer token baked into its default headers.
@@ -176,6 +177,51 @@ impl Client {
         let base = base_url.trim_end_matches('/');
         let url = format!("{}{}", base, path);
         let resp = reqwest::Client::new().post(&url).json(body).send().await?;
+        decode(url, resp).await
+    }
+
+    /// `POST {base_url}{path}` with `body` as JSON against a public,
+    /// unauthenticated endpoint that is **HMAC-signed** with a per-build
+    /// shared secret.
+    ///
+    /// Like [`Client::post_public_json`] this builds a fresh, token-less
+    /// `reqwest::Client` (the endpoint runs before any sign-in), but it
+    /// additionally signs the request so the platform can authenticate it
+    /// came from a genuine product build and reject stale replays — see
+    /// [`crate::sign`] for the scheme.
+    ///
+    /// `signing_key` is the per-build secret. The exact JSON bytes we
+    /// serialize here are both what gets hashed into the signature and
+    /// what is sent as the body, so the platform's body-hash check lines
+    /// up byte-for-byte. The four `X-WK-Sig-*` headers carry the version,
+    /// timestamp, nonce, and signature.
+    ///
+    /// Used by the anonymous first-run install heartbeat (see
+    /// [`Client::install_heartbeat`]).
+    pub async fn post_public_signed_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+        base_url: &str,
+        path: &str,
+        body: &B,
+        signing_key: &str,
+    ) -> Result<T> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        // Serialize once: sign the same bytes we send so the platform's
+        // body-hash matches exactly (a re-serialize could, in principle,
+        // reorder map keys and break the hash).
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| Error::BadRequest(format!("serializing signed request body: {e}")))?;
+        let (ver, ts, nonce, sig) = sign::sign_request(signing_key, "POST", path, &body_bytes);
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(sign::HEADER_VERSION, ver)
+            .header(sign::HEADER_TIMESTAMP, ts)
+            .header(sign::HEADER_NONCE, nonce)
+            .header(sign::HEADER_SIGNATURE, sig)
+            .body(body_bytes)
+            .send()
+            .await?;
         decode(url, resp).await
     }
 

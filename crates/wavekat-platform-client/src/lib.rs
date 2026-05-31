@@ -40,6 +40,7 @@ mod client;
 mod error;
 mod me;
 mod oauth;
+mod sign;
 mod sync;
 mod token;
 mod voice;
