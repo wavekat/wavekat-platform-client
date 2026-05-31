@@ -34,12 +34,15 @@ futures-util = "0.3"
 # so callers don't re-implement detection. See src/voice.rs.
 os_info = { version = "3", default-features = false }
 sys-locale = "0.3"
-# HMAC-SHA256 request signing for the public install-heartbeat endpoint
-# (`Client::post_public_signed_json`). The caller supplies a per-build
-# shared secret; we sign a canonical (timestamp, nonce, method, path,
-# body-hash) string so the platform can authenticate the request came
-# from a genuine build and reject stale replays. See src/sign.rs.
-hmac = "0.12"
+# Ed25519 release-attestation signing for public endpoints
+# (`Client::post_public_signed_json`). A build carries a per-version
+# Ed25519 key + a certificate issued by the offline release master key;
+# it signs a canonical (timestamp, nonce, method, path, body-hash) string
+# so the platform can verify — with only the master *public* key — that
+# the request came from a genuine release and reject stale replays. See
+# src/sign.rs. `sha2`/`hex` hash the body and encode keys/sigs for
+# headers + env-var transport.
+ed25519-dalek = "2"
 sha2 = "0.10"
 hex = "0.4"
 

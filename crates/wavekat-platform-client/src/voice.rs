@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::sign::ReleaseCredential;
 use crate::sync::{stamp_schema_version, HasSyncEnvelope, SyncEndpoint, SyncEnvelope, SyncRequest};
 
 /// Inbound vs. outbound. Wire-stable snake_case strings — never
@@ -385,19 +386,20 @@ impl Client {
     /// unauthenticated — there's no token, and at first run there's no
     /// signed-in `Client` to hang it off of.
     ///
-    /// Though unauthenticated, the request is **HMAC-signed** with
-    /// `signing_key` (a per-build shared secret the consumer injects at
-    /// compile time) so the platform can reject forged or replayed pings
-    /// — see [`Client::post_public_signed_json`] and [`crate::sign`]. The
-    /// platform must hold the same secret; rotate by configuring the
-    /// platform with both the old and new key across a release.
+    /// Though unauthenticated, the request is **signed** with the release
+    /// credential `cred` (a per-version Ed25519 key + master-issued
+    /// certificate the consumer bakes in at build time) so the platform
+    /// can verify it came from a genuine release and reject forged or
+    /// replayed pings — see [`Client::post_public_signed_json`] and
+    /// [`crate::sign`]. The platform needs only the master *public* key to
+    /// verify.
     ///
     /// `base_url` is the platform base (e.g. `https://platform.wavekat.com`).
     pub async fn install_heartbeat(
         base_url: &str,
         install_id: &str,
         app_version: &str,
-        signing_key: &str,
+        cred: &ReleaseCredential,
     ) -> Result<InstallHeartbeatResponse> {
         let sys = SystemInfo::detect();
         let body = InstallHeartbeatRequest {
@@ -412,7 +414,7 @@ impl Client {
             base_url,
             "/api/voice/installs/heartbeat",
             &body,
-            signing_key,
+            cred,
         )
         .await
     }

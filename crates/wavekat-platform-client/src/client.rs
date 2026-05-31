@@ -19,7 +19,7 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{Error, Result};
-use crate::sign;
+use crate::sign::{self, ReleaseCredential};
 use crate::token::Token;
 
 /// HTTP client with the bearer token baked into its default headers.
@@ -181,28 +181,30 @@ impl Client {
     }
 
     /// `POST {base_url}{path}` with `body` as JSON against a public,
-    /// unauthenticated endpoint that is **HMAC-signed** with a per-build
-    /// shared secret.
+    /// unauthenticated endpoint, **signed** with a release credential so
+    /// the platform can verify the request came from a genuine release.
     ///
     /// Like [`Client::post_public_json`] this builds a fresh, token-less
     /// `reqwest::Client` (the endpoint runs before any sign-in), but it
-    /// additionally signs the request so the platform can authenticate it
-    /// came from a genuine product build and reject stale replays — see
-    /// [`crate::sign`] for the scheme.
+    /// additionally signs the request with the per-version key in `cred`
+    /// and forwards `cred`'s certificate so the platform can establish
+    /// trust from only the master public key, and reject stale replays —
+    /// see [`crate::sign`] (and [`ReleaseCredential`]) for the scheme.
     ///
-    /// `signing_key` is the per-build secret. The exact JSON bytes we
-    /// serialize here are both what gets hashed into the signature and
-    /// what is sent as the body, so the platform's body-hash check lines
-    /// up byte-for-byte. The four `X-WK-Sig-*` headers carry the version,
-    /// timestamp, nonce, and signature.
+    /// The exact JSON bytes serialized here are both what gets hashed into
+    /// the signature and what is sent as the body, so the platform's
+    /// body-hash check lines up byte-for-byte. The `X-WK-*` headers carry
+    /// the scheme version, timestamp, nonce, build version, per-version
+    /// public key, certificate, and request signature.
     ///
-    /// Used by the anonymous first-run install heartbeat (see
-    /// [`Client::install_heartbeat`]).
+    /// General-purpose: any public endpoint that needs release
+    /// attestation uses this. The anonymous first-run install heartbeat
+    /// (see [`Client::install_heartbeat`]) is the first consumer.
     pub async fn post_public_signed_json<T: DeserializeOwned, B: Serialize + ?Sized>(
         base_url: &str,
         path: &str,
         body: &B,
-        signing_key: &str,
+        cred: &ReleaseCredential,
     ) -> Result<T> {
         let base = base_url.trim_end_matches('/');
         let url = format!("{}{}", base, path);
@@ -211,14 +213,17 @@ impl Client {
         // reorder map keys and break the hash).
         let body_bytes = serde_json::to_vec(body)
             .map_err(|e| Error::BadRequest(format!("serializing signed request body: {e}")))?;
-        let (ver, ts, nonce, sig) = sign::sign_request(signing_key, "POST", path, &body_bytes);
+        let rs = cred.sign_request("POST", path, &body_bytes)?;
         let resp = reqwest::Client::new()
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .header(sign::HEADER_VERSION, ver)
-            .header(sign::HEADER_TIMESTAMP, ts)
-            .header(sign::HEADER_NONCE, nonce)
-            .header(sign::HEADER_SIGNATURE, sig)
+            .header(sign::HEADER_VERSION, sign::SIG_VERSION)
+            .header(sign::HEADER_TIMESTAMP, rs.timestamp)
+            .header(sign::HEADER_NONCE, rs.nonce)
+            .header(sign::HEADER_BUILD_VERSION, &cred.version)
+            .header(sign::HEADER_PUBKEY, &cred.public_key_hex)
+            .header(sign::HEADER_CERT, &cred.cert_hex)
+            .header(sign::HEADER_SIGNATURE, rs.signature_hex)
             .body(body_bytes)
             .send()
             .await?;
