@@ -230,6 +230,32 @@ impl Client {
         decode(url, resp).await
     }
 
+    /// `GET {base_url}{path}?{query}` against a public, unauthenticated
+    /// platform endpoint. Like [`Client::put_presigned_bytes`], builds
+    /// a fresh `reqwest::Client` so the request carries no
+    /// `Authorization` header — sending one to an endpoint that doesn't
+    /// expect it can trigger surprising server-side branches and
+    /// defeats edge-cache key uniformity.
+    ///
+    /// Used by callers that need to read public configuration before
+    /// any user has signed in (e.g. provider-preset lookups during
+    /// desktop-client onboarding). For authenticated reads use
+    /// [`Client::get_json`] or [`Client::get_json_query`].
+    pub async fn get_public_json<T: DeserializeOwned>(
+        base_url: &str,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        let mut req = reqwest::Client::new().get(&url);
+        if !query.is_empty() {
+            req = req.query(query);
+        }
+        let resp = req.send().await?;
+        decode(url, resp).await
+    }
+
     /// Stream a `GET` response body into `sink`. Returns the number of
     /// bytes written. Used for big payloads (manifests, audio clips)
     /// where holding the whole body in memory would be wasteful.
