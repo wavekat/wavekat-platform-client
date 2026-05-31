@@ -51,8 +51,9 @@ pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingH
 pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
-    VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls,
-    VoiceCallsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings,
-    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
-    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    InstallHeartbeatRequest, InstallHeartbeatResponse, SystemInfo, VoiceCallDirection,
+    VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery,
+    VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery,
+    VoiceRecordingsSyncResponse, VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts,
+    VoiceTranscriptsQuery,
 };

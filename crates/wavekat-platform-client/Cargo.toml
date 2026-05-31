@@ -27,6 +27,13 @@ thiserror = "1"
 # `rt-multi-thread` or `macros` — let the consumer pick the runtime.
 tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
 futures-util = "0.3"
+# Host-environment probes for the anonymous install heartbeat
+# (`Client::install_heartbeat`). `os_info` resolves the OS version
+# string; `sys-locale` reads the system BCP-47 locale. Both are small,
+# dependency-light, and cross-platform — kept here (not in the consumer)
+# so callers don't re-implement detection. See src/voice.rs.
+os_info = { version = "3", default-features = false }
+sys-locale = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time", "sync"] }

@@ -156,6 +156,29 @@ impl Client {
         ensure_success(presigned_url.to_string(), resp).await
     }
 
+    /// `POST {base_url}{path}` with `body` as JSON against a public,
+    /// unauthenticated platform endpoint. Deliberately builds a *fresh*
+    /// `reqwest::Client` (like [`Client::put_presigned_bytes`]) so the
+    /// request carries no `Authorization` header: sending a bearer to a
+    /// route that doesn't expect one can trip surprising server-side
+    /// branches, and a token-less request is the honest shape for an
+    /// endpoint that runs before any sign-in.
+    ///
+    /// Used by callers that report something before a user has
+    /// authenticated — e.g. the anonymous first-run install heartbeat
+    /// (see [`Client::install_heartbeat`]). For authenticated writes use
+    /// [`Client::post_json`].
+    pub async fn post_public_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+        base_url: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        let resp = reqwest::Client::new().post(&url).json(body).send().await?;
+        decode(url, resp).await
+    }
+
     /// Stream a `GET` response body into `sink`. Returns the number of
     /// bytes written. Used for big payloads (manifests, audio clips)
     /// where holding the whole body in memory would be wasteful.
