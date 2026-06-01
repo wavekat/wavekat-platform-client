@@ -13,7 +13,11 @@ use crate::error::Result;
 /// The signed-in user, as returned by `GET /api/me`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Me {
-    pub id: i64,
+    /// Opaque platform user id. A UUID string since wavekat-platform
+    /// switched `users.id` off integer surrogate keys (which leaked the
+    /// signup count). Treat as an opaque token — never parse or compare
+    /// numerically.
+    pub id: String,
     pub login: String,
     pub name: Option<String>,
     pub email: Option<String>,
