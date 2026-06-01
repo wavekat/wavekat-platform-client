@@ -1,11 +1,17 @@
 //! Release-key tooling for the Ed25519 attestation scheme (see
 //! `src/sign.rs`). Two subcommands, both meant to run in CI / by hand —
-//! never in the shipped daemon.
+//! never in the shipped daemon. Gated behind the `release-tooling`
+//! feature so it isn't part of the crate's default build surface; install
+//! it with:
+//!
+//! ```text
+//! cargo install wavekat-platform-client --bin release-keys --features release-tooling
+//! ```
 //!
 //! ## One-time setup
 //!
 //! ```text
-//! cargo run --example release_keys -- master
+//! release-keys master
 //! ```
 //!
 //! Prints the offline release master keypair. Store the **private** line
@@ -16,7 +22,7 @@
 //! ## Per release (in CI, with the master private key in the env)
 //!
 //! ```text
-//! WK_RELEASE_MASTER_PRIVATE=<hex> cargo run --example release_keys -- issue 0.0.22
+//! WK_RELEASE_MASTER_PRIVATE=<hex> release-keys issue 0.0.22
 //! ```
 //!
 //! Generates a fresh per-version keypair, signs its certificate with the
@@ -51,7 +57,7 @@ fn main() -> ExitCode {
         }
         Some("issue") => {
             let Some(version) = args.get(2) else {
-                eprintln!("usage: release_keys issue <version>");
+                eprintln!("usage: release-keys issue <version>");
                 return ExitCode::FAILURE;
             };
             let master = match std::env::var("WK_RELEASE_MASTER_PRIVATE") {
@@ -77,7 +83,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: release_keys <master|issue <version>>");
+            eprintln!("usage: release-keys <master|issue <version>>");
             ExitCode::FAILURE
         }
     }
