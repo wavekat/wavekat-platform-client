@@ -212,8 +212,8 @@ impl ReleaseCredential {
 //
 // These run offline in CI, not in the daemon, but live here so the byte
 // formats they emit are guaranteed to match what the signer above and the
-// platform verifier consume. The `release_keys` example wraps them in a
-// CLI.
+// platform verifier consume. The `release-keys` binary (feature
+// `release-tooling`) wraps them in a CLI.
 
 /// A freshly generated Ed25519 keypair as hex `(private_hex, public_hex)`.
 pub fn generate_keypair() -> (String, String) {
