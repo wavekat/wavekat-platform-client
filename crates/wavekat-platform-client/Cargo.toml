@@ -27,6 +27,24 @@ thiserror = "1"
 # `rt-multi-thread` or `macros` — let the consumer pick the runtime.
 tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
 futures-util = "0.3"
+# Host-environment probes for the anonymous install heartbeat
+# (`Client::install_heartbeat`). `os_info` resolves the OS version
+# string; `sys-locale` reads the system BCP-47 locale. Both are small,
+# dependency-light, and cross-platform — kept here (not in the consumer)
+# so callers don't re-implement detection. See src/voice.rs.
+os_info = { version = "3", default-features = false }
+sys-locale = "0.3"
+# Ed25519 release-attestation signing for public endpoints
+# (`Client::post_public_signed_json`). A build carries a per-version
+# Ed25519 key + a certificate issued by the offline release master key;
+# it signs a canonical (timestamp, nonce, method, path, body-hash) string
+# so the platform can verify — with only the master *public* key — that
+# the request came from a genuine release and reject stale replays. See
+# src/sign.rs. `sha2`/`hex` hash the body and encode keys/sigs for
+# headers + env-var transport.
+ed25519-dalek = "2"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time", "sync"] }

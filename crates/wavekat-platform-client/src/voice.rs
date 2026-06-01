@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::sign::ReleaseCredential;
 use crate::sync::{stamp_schema_version, HasSyncEnvelope, SyncEndpoint, SyncEnvelope, SyncRequest};
 
 /// Inbound vs. outbound. Wire-stable snake_case strings — never
@@ -292,6 +293,133 @@ impl HasSyncEnvelope for VoiceTranscriptRecord {
     }
 }
 
+// ---- Anonymous install heartbeat ------------------------------------------
+//
+// A first-run / per-launch ping the desktop daemon fires *before* (and
+// independently of) any platform sign-in, so the platform can count
+// installs and track version / OS adoption for users who never sign in.
+// It hits the public, unauthenticated `POST /api/voice/installs/heartbeat`
+// and upserts a row keyed by `install_id` alone (no user) — distinct
+// from the authenticated `voice_clients` heartbeat, which is keyed by
+// `(user, install_id)`.
+//
+// The environment fields (os / os_version / arch / locale) are gathered
+// *here*, inside the client crate, rather than on the consumer side:
+// the daemon only owns the two values this crate genuinely cannot
+// discover — the persisted `install_id` and its own app version.
+
+/// Best-effort snapshot of the host environment, detected at call time.
+/// Every field is best-effort; a probe that fails contributes `None`
+/// (or, for the always-available `os` / `arch`, the compile-time
+/// target) rather than failing the heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfo {
+    /// `std::env::consts::OS` — `"macos"`, `"windows"`, `"linux"`, …
+    pub os: String,
+    /// Human OS version, e.g. `"15.5.0"`. `None` when the OS probe
+    /// can't determine it.
+    pub os_version: Option<String>,
+    /// `std::env::consts::ARCH` — `"aarch64"`, `"x86_64"`, …
+    pub arch: String,
+    /// BCP-47 system locale, e.g. `"en-NZ"`. `None` when unset /
+    /// undetectable (common for GUI-launched apps on some platforms).
+    pub locale: Option<String>,
+}
+
+impl SystemInfo {
+    /// Probe the current host. Cheap enough to call per heartbeat; we
+    /// don't cache so a locale change between launches is reflected.
+    pub fn detect() -> Self {
+        let os_version = match os_info::get().version() {
+            os_info::Version::Unknown => None,
+            v => Some(v.to_string()),
+        };
+        SystemInfo {
+            os: std::env::consts::OS.to_string(),
+            os_version,
+            arch: std::env::consts::ARCH.to_string(),
+            locale: sys_locale::get_locale(),
+        }
+    }
+}
+
+/// Body of `POST /api/voice/installs/heartbeat`. The daemon supplies
+/// `install_id` + `app_version`; [`Client::install_heartbeat`] fills the
+/// environment fields from [`SystemInfo::detect`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallHeartbeatRequest {
+    /// The daemon's persisted install UUID — the platform's upsert key.
+    pub install_id: String,
+    /// WaveKat Voice's own version (`env!("CARGO_PKG_VERSION")` on the
+    /// daemon side) — *not* this crate's version.
+    pub app_version: String,
+    pub os: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+}
+
+/// The platform's view of an install row, echoed back from a heartbeat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallHeartbeatResponse {
+    pub id: String,
+    pub install_id: String,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: Option<String>,
+    pub arch: Option<String>,
+    pub locale: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+impl Client {
+    /// `POST /api/voice/installs/heartbeat` — the anonymous, no-auth
+    /// first-run install ping. Detects the host environment internally
+    /// and posts it alongside the caller-supplied `install_id` +
+    /// `app_version`. Associated (not a method) because the endpoint is
+    /// unauthenticated — there's no token, and at first run there's no
+    /// signed-in `Client` to hang it off of.
+    ///
+    /// Though unauthenticated, the request is **signed** with the release
+    /// credential `cred` (a per-version Ed25519 key + master-issued
+    /// certificate the consumer bakes in at build time) so the platform
+    /// can verify it came from a genuine release and reject forged or
+    /// replayed pings — see [`Client::post_public_signed_json`] and
+    /// [`crate::sign`]. The platform needs only the master *public* key to
+    /// verify.
+    ///
+    /// `base_url` is the platform base (e.g. `https://platform.wavekat.com`).
+    pub async fn install_heartbeat(
+        base_url: &str,
+        install_id: &str,
+        app_version: &str,
+        cred: &ReleaseCredential,
+    ) -> Result<InstallHeartbeatResponse> {
+        let sys = SystemInfo::detect();
+        let body = InstallHeartbeatRequest {
+            install_id: install_id.to_string(),
+            app_version: app_version.to_string(),
+            os: sys.os,
+            os_version: sys.os_version,
+            arch: Some(sys.arch),
+            locale: sys.locale,
+        };
+        Client::post_public_signed_json::<InstallHeartbeatResponse, _>(
+            base_url,
+            "/api/voice/installs/heartbeat",
+            &body,
+            cred,
+        )
+        .await
+    }
+}
+
 // ---- Client surface for recordings ----------------------------------------
 //
 // Recordings don't fit the generic `Client::sync` shape cleanly:
@@ -534,6 +662,78 @@ mod tests {
         assert_eq!(parsed.items[0].r2_key, "voice/recordings/1/a.wav");
         assert!(!parsed.items[0].bytes_uploaded);
         assert!(parsed.items[1].bytes_uploaded);
+    }
+
+    #[test]
+    fn install_heartbeat_request_serializes_with_camel_case_keys() {
+        let req = InstallHeartbeatRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.21".into(),
+            os: "macos".into(),
+            os_version: Some("15.5.0".into()),
+            arch: Some("aarch64".into()),
+            locale: Some("en-NZ".into()),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"installId\":"), "{s}");
+        assert!(s.contains("\"appVersion\":\"0.0.21\""), "{s}");
+        assert!(s.contains("\"os\":\"macos\""), "{s}");
+        assert!(s.contains("\"osVersion\":\"15.5.0\""), "{s}");
+        assert!(s.contains("\"arch\":\"aarch64\""), "{s}");
+        assert!(s.contains("\"locale\":\"en-NZ\""), "{s}");
+    }
+
+    #[test]
+    fn install_heartbeat_request_omits_absent_optional_fields() {
+        // A host where the OS version / locale probe came up empty
+        // shouldn't send `null` — keeping the keys out lets the
+        // platform's Zod `.optional()` accept the body and the column
+        // stay NULL rather than the string "null".
+        let req = InstallHeartbeatRequest {
+            install_id: "x".into(),
+            app_version: "0.0.21".into(),
+            os: "linux".into(),
+            os_version: None,
+            arch: None,
+            locale: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(!s.contains("osVersion"), "osVersion should be omitted: {s}");
+        assert!(!s.contains("arch"), "arch should be omitted: {s}");
+        assert!(!s.contains("locale"), "locale should be omitted: {s}");
+    }
+
+    #[test]
+    fn install_heartbeat_response_parses_platform_shape() {
+        let raw = r#"{
+            "id": "abc-123",
+            "installId": "11111111-1111-4111-8111-111111111111",
+            "appVersion": "0.0.21",
+            "os": "macos",
+            "osVersion": "15.5.0",
+            "arch": "aarch64",
+            "locale": null,
+            "firstSeenAt": "2026-05-31T10:00:00.000Z",
+            "lastSeenAt": "2026-05-31T10:00:00.000Z"
+        }"#;
+        let parsed: InstallHeartbeatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.id, "abc-123");
+        assert_eq!(parsed.app_version, "0.0.21");
+        assert_eq!(parsed.os_version.as_deref(), Some("15.5.0"));
+        assert!(parsed.locale.is_none());
+    }
+
+    #[test]
+    fn system_info_detect_fills_os_and_arch() {
+        // os / arch come from compile-time consts, so they're always
+        // non-empty on every supported target. os_version / locale are
+        // best-effort and intentionally not asserted.
+        let sys = SystemInfo::detect();
+        assert!(!sys.os.is_empty(), "os should be a non-empty target string");
+        assert!(
+            !sys.arch.is_empty(),
+            "arch should be a non-empty target string"
+        );
     }
 
     #[test]

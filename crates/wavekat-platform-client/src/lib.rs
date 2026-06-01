@@ -40,6 +40,7 @@ mod client;
 mod error;
 mod me;
 mod oauth;
+mod sign;
 mod sync;
 mod token;
 mod voice;
@@ -48,11 +49,16 @@ pub use client::Client;
 pub use error::{Error, Result};
 pub use me::Me;
 pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
+pub use sign::{
+    cert_payload, generate_keypair, generate_master, issue_release_credential, verify_cert,
+    verify_request, ReleaseCredential, RequestSignature,
+};
 pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
-    VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls,
-    VoiceCallsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings,
-    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
-    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    InstallHeartbeatRequest, InstallHeartbeatResponse, SystemInfo, VoiceCallDirection,
+    VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery,
+    VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery,
+    VoiceRecordingsSyncResponse, VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts,
+    VoiceTranscriptsQuery,
 };

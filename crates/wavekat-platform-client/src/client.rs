@@ -13,12 +13,13 @@
 //! mechanical.
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{Error, Result};
+use crate::sign::{self, ReleaseCredential};
 use crate::token::Token;
 
 /// HTTP client with the bearer token baked into its default headers.
@@ -154,6 +155,79 @@ impl Client {
             .send()
             .await?;
         ensure_success(presigned_url.to_string(), resp).await
+    }
+
+    /// `POST {base_url}{path}` with `body` as JSON against a public,
+    /// unauthenticated platform endpoint. Deliberately builds a *fresh*
+    /// `reqwest::Client` (like [`Client::put_presigned_bytes`]) so the
+    /// request carries no `Authorization` header: sending a bearer to a
+    /// route that doesn't expect one can trip surprising server-side
+    /// branches, and a token-less request is the honest shape for an
+    /// endpoint that runs before any sign-in.
+    ///
+    /// Used by callers that report something before a user has
+    /// authenticated — e.g. the anonymous first-run install heartbeat
+    /// (see [`Client::install_heartbeat`]). For authenticated writes use
+    /// [`Client::post_json`].
+    pub async fn post_public_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+        base_url: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        let resp = reqwest::Client::new().post(&url).json(body).send().await?;
+        decode(url, resp).await
+    }
+
+    /// `POST {base_url}{path}` with `body` as JSON against a public,
+    /// unauthenticated endpoint, **signed** with a release credential so
+    /// the platform can verify the request came from a genuine release.
+    ///
+    /// Like [`Client::post_public_json`] this builds a fresh, token-less
+    /// `reqwest::Client` (the endpoint runs before any sign-in), but it
+    /// additionally signs the request with the per-version key in `cred`
+    /// and forwards `cred`'s certificate so the platform can establish
+    /// trust from only the master public key, and reject stale replays —
+    /// see [`crate::sign`] (and [`ReleaseCredential`]) for the scheme.
+    ///
+    /// The exact JSON bytes serialized here are both what gets hashed into
+    /// the signature and what is sent as the body, so the platform's
+    /// body-hash check lines up byte-for-byte. The `X-WK-*` headers carry
+    /// the scheme version, timestamp, nonce, build version, per-version
+    /// public key, certificate, and request signature.
+    ///
+    /// General-purpose: any public endpoint that needs release
+    /// attestation uses this. The anonymous first-run install heartbeat
+    /// (see [`Client::install_heartbeat`]) is the first consumer.
+    pub async fn post_public_signed_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+        base_url: &str,
+        path: &str,
+        body: &B,
+        cred: &ReleaseCredential,
+    ) -> Result<T> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        // Serialize once: sign the same bytes we send so the platform's
+        // body-hash matches exactly (a re-serialize could, in principle,
+        // reorder map keys and break the hash).
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| Error::BadRequest(format!("serializing signed request body: {e}")))?;
+        let rs = cred.sign_request("POST", path, &body_bytes)?;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(sign::HEADER_VERSION, sign::SIG_VERSION)
+            .header(sign::HEADER_TIMESTAMP, rs.timestamp)
+            .header(sign::HEADER_NONCE, rs.nonce)
+            .header(sign::HEADER_BUILD_VERSION, &cred.version)
+            .header(sign::HEADER_PUBKEY, &cred.public_key_hex)
+            .header(sign::HEADER_CERT, &cred.cert_hex)
+            .header(sign::HEADER_SIGNATURE, rs.signature_hex)
+            .body(body_bytes)
+            .send()
+            .await?;
+        decode(url, resp).await
     }
 
     /// `GET {base_url}{path}?{query}` against a public, unauthenticated
