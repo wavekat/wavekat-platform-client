@@ -35,6 +35,12 @@ This crate is the one place that knows how to talk to `platform.wavekat.com`. Ea
 - **Single bearer token shape**: `wk_…` issued by `POST /api/auth/cli/tokens`. The route path is historical (the CLI was the only consumer originally); the platform mints the same kind of token for any caller that completes the loopback OAuth flow.
 - **No async runtime opinion in the surface** — uses `reqwest` async with whatever runtime the consumer brings (tokio in practice).
 
+## About WaveKat
+
+`wavekat-platform-client` is part of WaveKat, an open-source ecosystem for building real-time voice pipelines and a platform for working with voice data. It is the shared Rust client that WaveKat tools use to talk to that platform.
+
+See [wavekat.com](https://wavekat.com) for the full project.
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).
