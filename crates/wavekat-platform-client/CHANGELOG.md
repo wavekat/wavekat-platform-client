@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.8...v0.0.9) - 2026-06-07
+
+### Added
+
+- add ConnectionLost voice-call end reason ([#18](https://github.com/wavekat/wavekat-platform-client/pull/18))
+
+### Other
+
+- link wavekat.com from README ([#16](https://github.com/wavekat/wavekat-platform-client/pull/16))
+
 ## [0.0.8](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.7...v0.0.8) - 2026-06-01
 
 ### Added
