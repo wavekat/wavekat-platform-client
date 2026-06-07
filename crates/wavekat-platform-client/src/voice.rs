@@ -57,6 +57,12 @@ pub enum VoiceCallEndReason {
     RejectedRemote,
     Missed,
     CancelledLocal,
+    /// An established call torn down because its connection died —
+    /// the daemon's RFC 4028 session keepalive stopped getting
+    /// answers (peer crashed, NAT binding dropped). Distinct from
+    /// `HangupLocal`: the user didn't end this call. Rows with this
+    /// reason still carry [`VoiceCallDisposition::Answered`].
+    ConnectionLost,
     Failed,
 }
 
@@ -571,12 +577,22 @@ mod tests {
             VoiceCallEndReason::RejectedRemote,
             VoiceCallEndReason::Missed,
             VoiceCallEndReason::CancelledLocal,
+            VoiceCallEndReason::ConnectionLost,
             VoiceCallEndReason::Failed,
         ] {
             let s = serde_json::to_string(&r).unwrap();
             let back: VoiceCallEndReason = serde_json::from_str(&s).unwrap();
             assert_eq!(r, back);
         }
+    }
+
+    #[test]
+    fn connection_lost_pins_its_wire_string() {
+        // The platform's sync endpoint validates end reasons against
+        // an exact string list — a rename here would make every
+        // upload from a session-timer teardown bounce with a 400.
+        let s = serde_json::to_string(&VoiceCallEndReason::ConnectionLost).unwrap();
+        assert_eq!(s, "\"connection_lost\"");
     }
 
     #[test]
