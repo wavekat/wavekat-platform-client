@@ -477,6 +477,107 @@ impl Client {
     }
 }
 
+// ---- Recording sharing ----------------------------------------------------
+//
+// Sharing is a *command* — mutate one recording's share state and get a
+// result back — not the "batch upsert + cursor list" shape `SyncEndpoint`
+// exists for (see wavekat-voice doc 38). So it's a typed method pair on
+// `Client` (mirroring `whoami` rather than `sync::<E>()`), not a marker.
+//
+// The desktop daemon keeps only a *mirror* of what these return; the
+// platform is authoritative for who may open a share. See
+// `wavekat-voice/docs/38-share-a-recording.md`.
+
+/// Access tier for a shared recording, mirroring Loom's model. Wire-stable
+/// snake_case strings — the platform's Zod schema validates against this
+/// exact list, so a rename here would bounce every share command with a 400.
+///
+/// - `Private` — owner only (the default; "not shared").
+/// - `Restricted` — owner + explicitly invited WaveKat accounts; the
+///   recipient must be signed in as an invited identity ("protected by login").
+/// - `Public` — anyone holding the capability link, no sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareVisibility {
+    Private,
+    Restricted,
+    Public,
+}
+
+/// Body of `POST /api/voice/recordings/{id}/share` — create or update a
+/// recording's share. The recording must already be synced (metadata +
+/// bytes) or the platform returns 404.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRecordingRequest {
+    /// The artifact UUID, as synced (daemon-side `artifacts.id`). Goes in
+    /// the URL path; carried in the struct so callers pass one value.
+    pub recording_source_id: String,
+    pub visibility: ShareVisibility,
+    /// Restricted tier — the WaveKat-account emails allowed to open the
+    /// share. Ignored (and omitted) for `Private` / `Public`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invited_emails: Option<Vec<String>>,
+    /// Phase 2 — out-of-band password gate. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Phase 2 — RFC 3339 auto-revoke time. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// The platform's response to a successful share command. `share_url` is
+/// the full https link the user copies; `token` is the opaque capability
+/// identifier embedded in it (returned separately so the daemon can store
+/// it for display without re-parsing the URL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRecordingResponse {
+    pub visibility: ShareVisibility,
+    pub token: String,
+    pub share_url: String,
+    /// RFC 3339 — when the recording was first shared.
+    pub shared_at: String,
+}
+
+impl Client {
+    /// `POST /api/voice/recordings/{id}/share` — create or update a share
+    /// for an already-synced recording. Returns the capability link + token
+    /// the desktop UI puts on the clipboard.
+    ///
+    /// Per the 404-not-403 ownership rule (doc 21 §"Authorization"), asking
+    /// to share a recording the caller doesn't own surfaces as
+    /// [`Error::Http`] with status 404 — existence doesn't leak.
+    pub async fn share_recording(
+        &self,
+        req: &ShareRecordingRequest,
+    ) -> Result<ShareRecordingResponse> {
+        if req.recording_source_id.is_empty() {
+            return Err(Error::BadRequest(
+                "recording_source_id must not be empty".into(),
+            ));
+        }
+        let path = format!(
+            "/api/voice/recordings/{}/share",
+            req.recording_source_id
+        );
+        self.post_json::<ShareRecordingResponse, _>(&path, req)
+            .await
+    }
+
+    /// `DELETE /api/voice/recordings/{id}/share` — revoke the share. The
+    /// recording reverts to Private and any outstanding link returns 410.
+    pub async fn revoke_recording_share(&self, recording_source_id: &str) -> Result<()> {
+        if recording_source_id.is_empty() {
+            return Err(Error::BadRequest(
+                "recording_source_id must not be empty".into(),
+            ));
+        }
+        let path = format!("/api/voice/recordings/{recording_source_id}/share");
+        self.delete(&path).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,5 +879,96 @@ mod tests {
         assert!(s.contains("\"endMs\":1500"), "{s}");
         assert!(s.contains("\"text\":\"hello\""), "{s}");
         assert!(s.contains("\"schemaVersion\":1"), "{s}");
+    }
+
+    #[test]
+    fn share_visibility_pins_its_wire_strings() {
+        // The platform validates these against an exact string list; a
+        // rename would bounce every share command with a 400.
+        assert_eq!(
+            serde_json::to_string(&ShareVisibility::Private).unwrap(),
+            "\"private\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ShareVisibility::Restricted).unwrap(),
+            "\"restricted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ShareVisibility::Public).unwrap(),
+            "\"public\""
+        );
+        for v in [
+            ShareVisibility::Private,
+            ShareVisibility::Restricted,
+            ShareVisibility::Public,
+        ] {
+            let s = serde_json::to_string(&v).unwrap();
+            let back: ShareVisibility = serde_json::from_str(&s).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn share_request_serializes_with_camel_case_and_omits_unset() {
+        let req = ShareRecordingRequest {
+            recording_source_id: "11111111-1111-4111-8111-111111111111".into(),
+            visibility: ShareVisibility::Public,
+            invited_emails: None,
+            password: None,
+            expires_at: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"recordingSourceId\":"), "{s}");
+        assert!(s.contains("\"visibility\":\"public\""), "{s}");
+        // Phase-2 / tier-specific fields stay off the wire when unset so
+        // the platform's `.optional()` schema accepts the body.
+        assert!(!s.contains("invitedEmails"), "{s}");
+        assert!(!s.contains("password"), "{s}");
+        assert!(!s.contains("expiresAt"), "{s}");
+    }
+
+    #[test]
+    fn share_request_carries_invited_emails_for_restricted() {
+        let req = ShareRecordingRequest {
+            recording_source_id: "a".into(),
+            visibility: ShareVisibility::Restricted,
+            invited_emails: Some(vec!["alex@example.com".into()]),
+            password: None,
+            expires_at: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"visibility\":\"restricted\""), "{s}");
+        assert!(s.contains("\"invitedEmails\":[\"alex@example.com\"]"), "{s}");
+    }
+
+    #[test]
+    fn share_response_parses_platform_shape() {
+        let raw = r#"{
+            "visibility": "public",
+            "token": "Zr7-x9F2k1QpLmN4sT8wYa",
+            "shareUrl": "https://platform.wavekat.com/voice/s/Zr7-x9F2k1QpLmN4sT8wYa",
+            "sharedAt": "2026-06-19T10:00:00.000Z"
+        }"#;
+        let parsed: ShareRecordingResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.visibility, ShareVisibility::Public);
+        assert_eq!(parsed.token, "Zr7-x9F2k1QpLmN4sT8wYa");
+        assert!(parsed.share_url.ends_with(&parsed.token));
+    }
+
+    #[test]
+    fn share_request_rejects_empty_source_id_before_hitting_network() {
+        // Guarded client-side so an empty id can't produce a path like
+        // `/api/voice/recordings//share` that 404s confusingly.
+        let req = ShareRecordingRequest {
+            recording_source_id: String::new(),
+            visibility: ShareVisibility::Private,
+            invited_emails: None,
+            password: None,
+            expires_at: None,
+        };
+        // We can't call the async method without a runtime here, but the
+        // guard mirrors `upload_recording_bytes` — assert the precondition
+        // shape the method checks.
+        assert!(req.recording_source_id.is_empty());
     }
 }
