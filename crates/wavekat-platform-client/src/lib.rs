@@ -56,9 +56,10 @@ pub use sign::{
 pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
-    InstallHeartbeatRequest, InstallHeartbeatResponse, SystemInfo, VoiceCallDirection,
-    VoiceCallDisposition, VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery,
-    VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery,
-    VoiceRecordingsSyncResponse, VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts,
-    VoiceTranscriptsQuery,
+    InstallHeartbeatRequest, InstallHeartbeatResponse, SystemInfo, VoiceAccountRecord,
+    VoiceAccounts, VoiceAccountsQuery, VoiceCallDirection, VoiceCallDisposition,
+    VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceRecordingRecord,
+    VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
+    VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    VoiceTransport,
 };
