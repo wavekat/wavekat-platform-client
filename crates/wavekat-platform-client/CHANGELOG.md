@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.10...v0.0.11) - 2026-06-21
+
+### Added
+
+- add recording share command pair to Client ([#19](https://github.com/wavekat/wavekat-platform-client/pull/19))
+
 ## [0.0.10](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.9...v0.0.10) - 2026-06-20
 
 ### Added
