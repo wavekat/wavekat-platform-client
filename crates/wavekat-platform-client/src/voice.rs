@@ -299,6 +299,115 @@ impl HasSyncEnvelope for VoiceTranscriptRecord {
     }
 }
 
+// ---- VoiceAccounts --------------------------------------------------------
+
+/// SIP transport for a synced account line. Wire-stable snake_case;
+/// mirrors the daemon's `TransportKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceTransport {
+    Udp,
+    Tcp,
+}
+
+/// One SIP account line's *configuration* as it crosses the wire from a
+/// device up to the platform and back down to another device
+/// (`wavekat-voice/docs/40-account-config-sync.md`).
+///
+/// Unlike calls / recordings / transcripts — which are immutable,
+/// one-way pushes — account config is **mutable and bidirectional**: a
+/// line is edited, toggled, renamed, and deleted, and those changes must
+/// restore onto a second device. The same idempotent
+/// `(user_id, source_id)` upsert that [`Client::sync`] performs carries
+/// every kind of change here; a *delete* is a soft-delete that rides as
+/// an upsert with `deleted_at` set, because a hard DELETE can't sync
+/// under a "push the row" model — once the row is gone there's nothing
+/// left to push.
+///
+/// **No secret field, by construction.** The SIP password never appears
+/// on this wire. Config sync (policy levels 1–2) keeps the credential
+/// device-local, and the end-to-end-encrypted secret path (level 3)
+/// ships its ciphertext through a *separate* opaque resource, never as a
+/// field here. Omitting it means level 3 can't be populated by accident
+/// before it exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceAccountRecord {
+    /// Daemon-side account UUID (`accounts.id`). The platform's
+    /// `(user_id, source_id)` upsert key — re-syncing the same id
+    /// updates the row in place (mutable), unlike the immutable
+    /// resources where a re-sync is a no-op.
+    pub source_id: String,
+    /// Whether the line registers on daemon boot. Pausing a line is a
+    /// portable preference, so it rides along.
+    pub enabled: bool,
+    pub display_name: String,
+    pub username: String,
+    pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub transport: VoiceTransport,
+    pub register_expires: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u32>,
+    /// Record-disclosure beep toggle — a column on the account row, so
+    /// it rides along for free (the account-portable taxonomy in doc 40).
+    pub disclosure_enabled: bool,
+    /// RFC 3339 last-modification time — the **last-write-wins key**. On
+    /// conflict the platform (and a pulling client) keep the copy with
+    /// the later `updated_at`. Whole-row LWW for v1; per-field merge is
+    /// deferred until users actually report lost edits (doc 40).
+    pub updated_at: String,
+    /// RFC 3339 soft-delete tombstone. `None` = live; `Some` = the line
+    /// was deleted on some device at that time. A tombstone syncs like
+    /// any other mutation so the delete propagates to other devices,
+    /// then is reaped locally once confirmed. The platform retains
+    /// tombstones so a late-syncing device still learns about the delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    /// Version + forward-compat fields shared by every sync record.
+    #[serde(flatten, default)]
+    pub envelope: SyncEnvelope,
+}
+
+/// Query params for `GET /api/voice/accounts`. All fields optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceAccountsQuery {
+    /// Include soft-deleted tombstones in the response. Absent / false
+    /// returns only live lines — the restore-grade pull a fresh device
+    /// wants. A delta-syncing device sets this `true` to also learn
+    /// about deletes made elsewhere (doc 40).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_deleted: Option<bool>,
+}
+
+/// Marker for the `/api/voice/accounts/{sync,list}` endpoint pair.
+///
+/// Accounts are the first *mutable, bidirectional* sync resource, but
+/// the wire shape is the same idempotent upsert the immutable resources
+/// use — the [`SyncResponse::skipped`](crate::sync::SyncResponse) field
+/// was reserved for exactly this case — so no new HTTP plumbing is
+/// needed: `client.sync::<VoiceAccounts>(&items)` uploads (including
+/// tombstones), `client.list::<VoiceAccounts>(&query)` pulls.
+pub struct VoiceAccounts;
+
+impl SyncEndpoint for VoiceAccounts {
+    const RESOURCE: &'static str = "accounts";
+    type Record = VoiceAccountRecord;
+    type Query = VoiceAccountsQuery;
+}
+
+impl HasSyncEnvelope for VoiceAccountRecord {
+    fn envelope_mut(&mut self) -> &mut SyncEnvelope {
+        &mut self.envelope
+    }
+}
+
 // ---- Anonymous install heartbeat ------------------------------------------
 //
 // A first-run / per-launch ping the desktop daemon fires *before* (and
@@ -557,10 +666,7 @@ impl Client {
                 "recording_source_id must not be empty".into(),
             ));
         }
-        let path = format!(
-            "/api/voice/recordings/{}/share",
-            req.recording_source_id
-        );
+        let path = format!("/api/voice/recordings/{}/share", req.recording_source_id);
         self.post_json::<ShareRecordingResponse, _>(&path, req)
             .await
     }
@@ -938,7 +1044,10 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"visibility\":\"restricted\""), "{s}");
-        assert!(s.contains("\"invitedEmails\":[\"alex@example.com\"]"), "{s}");
+        assert!(
+            s.contains("\"invitedEmails\":[\"alex@example.com\"]"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -970,5 +1079,147 @@ mod tests {
         // guard mirrors `upload_recording_bytes` — assert the precondition
         // shape the method checks.
         assert!(req.recording_source_id.is_empty());
+    }
+
+    // ---- VoiceAccounts ----
+
+    fn sample_account() -> VoiceAccountRecord {
+        VoiceAccountRecord {
+            source_id: "11111111-1111-4111-8111-111111111111".into(),
+            enabled: true,
+            display_name: "Work line".into(),
+            username: "alice".into(),
+            domain: "sip.example.com".into(),
+            auth_username: Some("alice-auth".into()),
+            server: Some("sip.example.com".into()),
+            port: Some(5060),
+            transport: VoiceTransport::Udp,
+            register_expires: 60,
+            keepalive_secs: Some(50),
+            disclosure_enabled: true,
+            updated_at: "2026-06-20T10:00:00Z".into(),
+            deleted_at: None,
+            envelope: SyncEnvelope::for_endpoint::<VoiceAccounts>(),
+        }
+    }
+
+    #[test]
+    fn accounts_marker_resource_is_accounts() {
+        // Path constant drives the URL in `Client::sync` / `Client::list`;
+        // a rename here would silently 404 against the platform.
+        assert_eq!(<VoiceAccounts as SyncEndpoint>::RESOURCE, "accounts");
+    }
+
+    #[test]
+    fn account_record_serializes_with_camel_case_and_envelope() {
+        let s = serde_json::to_string(&sample_account()).unwrap();
+        // Field-by-field wire contract — also what the platform's Zod
+        // schema expects.
+        assert!(s.contains("\"sourceId\":"), "{s}");
+        assert!(s.contains("\"displayName\":\"Work line\""), "{s}");
+        assert!(s.contains("\"authUsername\":\"alice-auth\""), "{s}");
+        assert!(s.contains("\"registerExpires\":60"), "{s}");
+        assert!(s.contains("\"keepaliveSecs\":50"), "{s}");
+        assert!(s.contains("\"disclosureEnabled\":true"), "{s}");
+        assert!(s.contains("\"transport\":\"udp\""), "{s}");
+        assert!(s.contains("\"updatedAt\":\"2026-06-20T10:00:00Z\""), "{s}");
+        // A live line carries no tombstone.
+        assert!(!s.contains("deletedAt"), "deletedAt should be omitted: {s}");
+        // The secret never crosses this wire, by construction.
+        assert!(!s.contains("password"), "no password field: {s}");
+        // Envelope flattens to the top, same as the other resources.
+        assert!(s.contains("\"schemaVersion\":1"), "{s}");
+    }
+
+    #[test]
+    fn account_tombstone_serializes_deleted_at() {
+        // A soft-delete rides as an upsert with deletedAt set — the
+        // delete-propagation mechanism (doc 40).
+        let mut r = sample_account();
+        r.deleted_at = Some("2026-06-20T12:00:00Z".into());
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"deletedAt\":\"2026-06-20T12:00:00Z\""), "{s}");
+    }
+
+    #[test]
+    fn account_record_round_trips_optional_fields() {
+        // A minimal line — no auth username, server, port, keepalive, or
+        // tombstone — should parse with those all absent.
+        let raw = r#"{
+            "sourceId": "a",
+            "enabled": false,
+            "displayName": "Cheap trunk",
+            "username": "u",
+            "domain": "d",
+            "transport": "tcp",
+            "registerExpires": 120,
+            "disclosureEnabled": false,
+            "updatedAt": "2026-06-20T10:00:00Z"
+        }"#;
+        let parsed: VoiceAccountRecord = serde_json::from_str(raw).unwrap();
+        assert!(!parsed.enabled);
+        assert!(parsed.auth_username.is_none());
+        assert!(parsed.server.is_none());
+        assert!(parsed.port.is_none());
+        assert!(parsed.keepalive_secs.is_none());
+        assert!(parsed.deleted_at.is_none());
+        assert_eq!(parsed.transport, VoiceTransport::Tcp);
+        assert_eq!(parsed.register_expires, 120);
+    }
+
+    #[test]
+    fn voice_transport_round_trips_via_json() {
+        for t in [VoiceTransport::Udp, VoiceTransport::Tcp] {
+            let s = serde_json::to_string(&t).unwrap();
+            let back: VoiceTransport = serde_json::from_str(&s).unwrap();
+            assert_eq!(t, back);
+        }
+        // Pin the wire strings — the daemon's `TransportKind` and the
+        // platform's Zod enum both depend on these exact tokens.
+        assert_eq!(
+            serde_json::to_string(&VoiceTransport::Udp).unwrap(),
+            "\"udp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VoiceTransport::Tcp).unwrap(),
+            "\"tcp\""
+        );
+    }
+
+    #[test]
+    fn accounts_query_omits_unset_and_serializes_include_deleted() {
+        let empty = serde_json::to_string(&VoiceAccountsQuery::default()).unwrap();
+        assert_eq!(empty, "{}", "default query should be empty: {empty}");
+        let with_deleted = serde_json::to_string(&VoiceAccountsQuery {
+            include_deleted: Some(true),
+        })
+        .unwrap();
+        assert!(
+            with_deleted.contains("\"includeDeleted\":true"),
+            "{with_deleted}"
+        );
+    }
+
+    #[test]
+    fn account_record_accepts_unknown_extras_for_forward_compat() {
+        // A newer client shipping a field this platform version lacks a
+        // column for round-trips via the `extras` envelope.
+        let raw = r#"{
+            "sourceId": "a",
+            "enabled": true,
+            "displayName": "x",
+            "username": "u",
+            "domain": "d",
+            "transport": "udp",
+            "registerExpires": 60,
+            "disclosureEnabled": true,
+            "updatedAt": "2026-06-20T10:00:00Z",
+            "schemaVersion": 2,
+            "extras": { "ringtone": "classic" }
+        }"#;
+        let parsed: VoiceAccountRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.envelope.schema_version, Some(2));
+        let extras = parsed.envelope.extras.as_ref().expect("extras present");
+        assert_eq!(extras["ringtone"], "classic");
     }
 }
