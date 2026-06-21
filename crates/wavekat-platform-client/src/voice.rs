@@ -649,6 +649,33 @@ pub struct ShareRecordingResponse {
     pub shared_at: String,
 }
 
+/// The platform's response to `GET /api/voice/recordings/{id}/share` — the
+/// *authoritative* current share state for an owned recording. The POST
+/// reply omits the invited-email list and a local mirror can't reflect a
+/// share changed from another device, so the desktop "who can open this"
+/// panel reads here.
+///
+/// A recording that was never shared (or whose share is revoked / expired)
+/// comes back as [`ShareVisibility::Private`] with the optional fields
+/// absent — the same "not shared" state DELETE leaves behind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareStateResponse {
+    pub visibility: ShareVisibility,
+    /// Absent when `visibility == Private` (nothing is shared).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
+    /// RFC 3339 — when the recording was first shared. Absent when private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_at: Option<String>,
+    /// The restricted tier's audience (lowercased, de-duped). Present
+    /// (possibly empty) only for [`ShareVisibility::Restricted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invited_emails: Option<Vec<String>>,
+}
+
 impl Client {
     /// `POST /api/voice/recordings/{id}/share` — create or update a share
     /// for an already-synced recording. Returns the capability link + token
@@ -669,6 +696,24 @@ impl Client {
         let path = format!("/api/voice/recordings/{}/share", req.recording_source_id);
         self.post_json::<ShareRecordingResponse, _>(&path, req)
             .await
+    }
+
+    /// `GET /api/voice/recordings/{id}/share` — read the authoritative
+    /// share state for an owned recording, including the restricted tier's
+    /// invited emails (which the share command's reply omits). Like
+    /// [`share_recording`](Self::share_recording), a recording the caller
+    /// doesn't own surfaces as [`Error::Http`] with status 404.
+    pub async fn get_recording_share(
+        &self,
+        recording_source_id: &str,
+    ) -> Result<ShareStateResponse> {
+        if recording_source_id.is_empty() {
+            return Err(Error::BadRequest(
+                "recording_source_id must not be empty".into(),
+            ));
+        }
+        let path = format!("/api/voice/recordings/{recording_source_id}/share");
+        self.get_json::<ShareStateResponse>(&path).await
     }
 
     /// `DELETE /api/voice/recordings/{id}/share` — revoke the share. The
@@ -1062,6 +1107,44 @@ mod tests {
         assert_eq!(parsed.visibility, ShareVisibility::Public);
         assert_eq!(parsed.token, "Zr7-x9F2k1QpLmN4sT8wYa");
         assert!(parsed.share_url.ends_with(&parsed.token));
+    }
+
+    #[test]
+    fn share_state_parses_restricted_with_invited_emails() {
+        // The GET read carries the audience back — this is the field the
+        // POST reply omits and the desktop "who can open this" panel needs.
+        let raw = r#"{
+            "visibility": "restricted",
+            "token": "Zr7-x9F2k1QpLmN4sT8wYa",
+            "shareUrl": "https://platform.wavekat.com/voice/s/Zr7-x9F2k1QpLmN4sT8wYa",
+            "sharedAt": "2026-06-19T10:00:00.000Z",
+            "invitedEmails": ["bob@example.com", "carol@example.com"]
+        }"#;
+        let parsed: ShareStateResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.visibility, ShareVisibility::Restricted);
+        assert_eq!(
+            parsed.invited_emails.as_deref(),
+            Some(
+                [
+                    "bob@example.com".to_string(),
+                    "carol@example.com".to_string()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn share_state_parses_private_with_fields_absent() {
+        // A never-shared (or revoked) recording reports private with no
+        // token / url / emails — the optional fields stay None.
+        let parsed: ShareStateResponse =
+            serde_json::from_str(r#"{ "visibility": "private" }"#).unwrap();
+        assert_eq!(parsed.visibility, ShareVisibility::Private);
+        assert!(parsed.token.is_none());
+        assert!(parsed.share_url.is_none());
+        assert!(parsed.shared_at.is_none());
+        assert!(parsed.invited_emails.is_none());
     }
 
     #[test]
