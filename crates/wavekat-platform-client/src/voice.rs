@@ -657,16 +657,23 @@ pub struct ShareRecordingRequest {
     /// Per-share visibility controls (platform docs/14) — what a viewer may
     /// see. Each is omitted when unset; the platform then applies its
     /// privacy-forward default (identity masked, transcript hidden, audio
-    /// shown). NB the platform treats the request as the *full* desired
-    /// state, so an omitted control is reset to its default, not preserved
-    /// from a prior share — send all three when editing an existing share's
-    /// controls.
+    /// shown, download off). NB the platform treats the request as the
+    /// *full* desired state, so an omitted control is reset to its default,
+    /// not preserved from a prior share — send all of them when editing an
+    /// existing share's controls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub party_masking: Option<PartyMasking>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_transcript: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_audio: Option<bool>,
+    /// Whether a viewer may *download* the WAV, distinct from hearing it.
+    /// Off by default and only meaningful while `show_audio` is true — the
+    /// platform forces it off otherwise (you can't save what you can't
+    /// hear). A soft control: it hides the viewer's Download affordance,
+    /// not the bytes a listener already fetches to play.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_download: Option<bool>,
     /// Phase 2 — out-of-band password gate. Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
@@ -690,13 +697,18 @@ pub struct ShareRecordingResponse {
     /// Effective visibility controls the platform stored (docs/14). Optional
     /// for tolerance — a platform predating the feature omits them, in which
     /// case the daemon should assume the defaults (identity masked, transcript
-    /// hidden, audio shown).
+    /// hidden, audio shown, download off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub party_masking: Option<PartyMasking>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_transcript: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_audio: Option<bool>,
+    /// Effective download permission — `show_audio && allow_download`, so
+    /// it's never true when the audio is hidden. Absent on a platform
+    /// predating the control (assume off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_download: Option<bool>,
 }
 
 /// The platform's response to `GET /api/voice/recordings/{id}/share` — the
@@ -732,6 +744,10 @@ pub struct ShareStateResponse {
     pub show_transcript: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_audio: Option<bool>,
+    /// Effective download permission — `show_audio && allow_download`, so
+    /// never true when the audio is hidden. Absent when private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_download: Option<bool>,
 }
 
 impl Client {
@@ -1216,6 +1232,7 @@ mod tests {
             party_masking: None,
             show_transcript: None,
             show_audio: None,
+            allow_download: None,
             password: None,
             expires_at: None,
         };
@@ -1229,6 +1246,7 @@ mod tests {
         assert!(!s.contains("partyMasking"), "{s}");
         assert!(!s.contains("showTranscript"), "{s}");
         assert!(!s.contains("showAudio"), "{s}");
+        assert!(!s.contains("allowDownload"), "{s}");
         assert!(!s.contains("password"), "{s}");
         assert!(!s.contains("expiresAt"), "{s}");
     }
@@ -1242,6 +1260,7 @@ mod tests {
             party_masking: Some(PartyMasking::Partial),
             show_transcript: Some(false),
             show_audio: Some(true),
+            allow_download: Some(true),
             password: None,
             expires_at: None,
         };
@@ -1249,6 +1268,7 @@ mod tests {
         assert!(s.contains("\"partyMasking\":\"partial\""), "{s}");
         assert!(s.contains("\"showTranscript\":false"), "{s}");
         assert!(s.contains("\"showAudio\":true"), "{s}");
+        assert!(s.contains("\"allowDownload\":true"), "{s}");
     }
 
     #[test]
@@ -1260,6 +1280,7 @@ mod tests {
             party_masking: None,
             show_transcript: None,
             show_audio: None,
+            allow_download: None,
             password: None,
             expires_at: None,
         };
@@ -1297,7 +1318,8 @@ mod tests {
             "invitedEmails": ["bob@example.com", "carol@example.com"],
             "partyMasking": "full",
             "showTranscript": true,
-            "showAudio": false
+            "showAudio": false,
+            "allowDownload": false
         }"#;
         let parsed: ShareStateResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.visibility, ShareVisibility::Restricted);
@@ -1315,6 +1337,8 @@ mod tests {
         assert_eq!(parsed.party_masking, Some(PartyMasking::Full));
         assert_eq!(parsed.show_transcript, Some(true));
         assert_eq!(parsed.show_audio, Some(false));
+        // Audio hidden here, so download comes back off (platform folds the two).
+        assert_eq!(parsed.allow_download, Some(false));
     }
 
     #[test]
@@ -1341,6 +1365,7 @@ mod tests {
             party_masking: None,
             show_transcript: None,
             show_audio: None,
+            allow_download: None,
             password: None,
             expires_at: None,
         };
