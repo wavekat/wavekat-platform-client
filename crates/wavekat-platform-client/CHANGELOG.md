@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.14...v0.0.15) - 2026-06-24
+
+### Added
+
+- *(voice)* add allow_download to share request/state ([#29](https://github.com/wavekat/wavekat-platform-client/pull/29))
+
 ## [0.0.14](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.13...v0.0.14) - 2026-06-24
 
 ### Fixed
