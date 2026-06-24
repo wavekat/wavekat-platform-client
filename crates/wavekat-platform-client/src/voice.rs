@@ -104,6 +104,14 @@ pub struct VoiceCallRecord {
     /// Free-text error, populated only when `disposition == Failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Visibility tier of any *active* (not revoked / expired) share on this
+    /// call's recording, or `None` when it isn't shared. Read-only: the
+    /// platform sets it on list (`GET /api/voice/calls`) and detail responses
+    /// so a consumer can badge the row "Public" / "Invited only"; it is
+    /// skipped on serialize, so syncing a call never sends it. `Private` never
+    /// appears here — an unshared call is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_visibility: Option<ShareVisibility>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -621,8 +629,9 @@ pub enum ShareVisibility {
 /// - `Partial` — best-effort redaction (keeps shape, drops the value).
 /// - `None` — the raw `party` is shown.
 ///
-/// Absent on the wire → the platform defaults to `Full` (identity hidden),
-/// so sharing is fail-closed. See `wavekat-platform` docs/14.
+/// Absent on the wire → the platform defaults to `Partial` (identity
+/// masked) — privacy-forward without fully erasing the caller. See
+/// `wavekat-platform` docs/14.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartyMasking {
@@ -647,10 +656,11 @@ pub struct ShareRecordingRequest {
     pub invited_emails: Option<Vec<String>>,
     /// Per-share visibility controls (platform docs/14) — what a viewer may
     /// see. Each is omitted when unset; the platform then applies its
-    /// privacy-forward default (identity hidden, audio + transcript shown).
-    /// NB the platform treats the request as the *full* desired state, so an
-    /// omitted control is reset to its default, not preserved from a prior
-    /// share — send all three when editing an existing share's controls.
+    /// privacy-forward default (identity masked, transcript hidden, audio
+    /// shown). NB the platform treats the request as the *full* desired
+    /// state, so an omitted control is reset to its default, not preserved
+    /// from a prior share — send all three when editing an existing share's
+    /// controls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub party_masking: Option<PartyMasking>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -679,8 +689,8 @@ pub struct ShareRecordingResponse {
     pub shared_at: String,
     /// Effective visibility controls the platform stored (docs/14). Optional
     /// for tolerance — a platform predating the feature omits them, in which
-    /// case the daemon should assume the defaults (identity hidden, audio +
-    /// transcript shown).
+    /// case the daemon should assume the defaults (identity masked, transcript
+    /// hidden, audio shown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub party_masking: Option<PartyMasking>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -795,6 +805,7 @@ mod tests {
             disposition: VoiceCallDisposition::Answered,
             end_reason: VoiceCallEndReason::HangupRemote,
             error: None,
+            share_visibility: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -923,6 +934,78 @@ mod tests {
         assert_eq!(parsed.envelope.schema_version, Some(2));
         let extras = parsed.envelope.extras.as_ref().expect("extras present");
         assert_eq!(extras["notes"], "from staging build");
+    }
+
+    #[test]
+    fn call_record_parses_share_visibility_from_list_response() {
+        // The list / detail endpoints decorate a call with the tier of any
+        // active share on its recording, so a consumer can badge the row.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "outbound",
+            "party": "+14155550123",
+            "ringAt": "2026-05-16T10:00:00Z",
+            "endAt": "2026-05-16T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_remote",
+            "shareVisibility": "public"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.share_visibility, Some(ShareVisibility::Public));
+
+        let restricted = raw.replace("public", "restricted");
+        let parsed: VoiceCallRecord = serde_json::from_str(&restricted).unwrap();
+        assert_eq!(parsed.share_visibility, Some(ShareVisibility::Restricted));
+    }
+
+    #[test]
+    fn call_record_unshared_has_no_share_visibility() {
+        // Absent (older platform, or an unshared call) and an explicit
+        // `null` both read as "not shared" — never `Some(Private)`.
+        let base = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "anon",
+            "ringAt": "2026-05-16T10:00:00Z",
+            "endAt": "2026-05-16T10:00:30Z",
+            "disposition": "missed",
+            "endReason": "missed"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(base).unwrap();
+        assert_eq!(parsed.share_visibility, None);
+
+        let with_null = base.replace(
+            r#""endReason": "missed""#,
+            r#""endReason": "missed", "shareVisibility": null"#,
+        );
+        let parsed: VoiceCallRecord = serde_json::from_str(&with_null).unwrap();
+        assert_eq!(parsed.share_visibility, None);
+    }
+
+    #[test]
+    fn synced_call_omits_share_visibility() {
+        // `share_visibility` is read-only decoration: a call uploaded via
+        // sync must not carry it on the wire (skip_serializing_if = None),
+        // so the round trip from a sync-shaped record stays clean.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "anon",
+            "ringAt": "2026-05-16T10:00:00Z",
+            "endAt": "2026-05-16T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_remote"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.share_visibility, None);
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            !s.contains("shareVisibility"),
+            "sync payload leaked share_visibility: {s}"
+        );
     }
 
     #[test]
