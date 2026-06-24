@@ -56,7 +56,7 @@ pub use sign::{
 pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
-    InstallHeartbeatRequest, InstallHeartbeatResponse, ShareRecordingRequest,
+    InstallHeartbeatRequest, InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest,
     ShareRecordingResponse, ShareVisibility, SystemInfo, VoiceAccountRecord, VoiceAccounts,
     VoiceAccountsQuery, VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason,
     VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem,

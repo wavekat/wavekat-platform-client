@@ -792,6 +792,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn share_visibility_types_are_reachable_from_the_crate_root() {
+        // Regression for the 0.0.13 gap: `PartyMasking` was added to this
+        // module but left out of the crate-root `pub use voice::{…}`, and the
+        // module is private — so a consumer (`wavekat-voice`) couldn't name
+        // the type to build a `ShareRecordingRequest`. Pin every share-control
+        // type to the root path so dropping one fails to compile here, not in
+        // a downstream crate. The body never runs; reachability is the test.
+        #[allow(dead_code)]
+        fn _reachable() {
+            let _: Option<crate::PartyMasking> = Some(crate::PartyMasking::Partial);
+            let _: Option<crate::ShareVisibility> = Some(crate::ShareVisibility::Public);
+            let _: fn(&crate::ShareRecordingRequest) = |_| {};
+            let _: fn(&crate::ShareRecordingResponse) = |_| {};
+        }
+    }
+
+    #[test]
     fn record_serializes_with_camel_case_keys() {
         let r = VoiceCallRecord {
             source_id: "11111111-1111-4111-8111-111111111111".into(),
