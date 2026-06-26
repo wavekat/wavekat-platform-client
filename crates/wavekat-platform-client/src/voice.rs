@@ -674,6 +674,18 @@ pub struct ShareRecordingRequest {
     /// not the bytes a listener already fetches to play.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_download: Option<bool>,
+    /// Per-channel playback defaults — which side is *audible by default*
+    /// in the viewer's player (docs/14). A call has two channels: `local`
+    /// (the owner's microphone, "your side") and `remote` (the other
+    /// party, "their side"). `true` means that side starts muted; the
+    /// viewer can still un-mute it, and the audio file is unchanged — this
+    /// is only the player's starting state. Each is omitted when unset, in
+    /// which case the platform defaults to audible (`false`). Only
+    /// meaningful while `show_audio` is true; ignored when audio is hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_local: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_remote: Option<bool>,
     /// Phase 2 — out-of-band password gate. Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
@@ -709,6 +721,13 @@ pub struct ShareRecordingResponse {
     /// predating the control (assume off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_download: Option<bool>,
+    /// Effective per-channel playback defaults the platform stored — which
+    /// side starts muted in the viewer's player (docs/14). Absent on a
+    /// platform predating the control (assume audible, `false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_local: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_remote: Option<bool>,
 }
 
 /// The platform's response to `GET /api/voice/recordings/{id}/share` — the
@@ -748,6 +767,12 @@ pub struct ShareStateResponse {
     /// never true when the audio is hidden. Absent when private.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_download: Option<bool>,
+    /// Effective per-channel playback defaults — which side starts muted in
+    /// the viewer's player (docs/14). Absent when private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_local: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mute_remote: Option<bool>,
 }
 
 impl Client {
@@ -1233,6 +1258,8 @@ mod tests {
             show_transcript: None,
             show_audio: None,
             allow_download: None,
+            default_mute_local: None,
+            default_mute_remote: None,
             password: None,
             expires_at: None,
         };
@@ -1247,6 +1274,8 @@ mod tests {
         assert!(!s.contains("showTranscript"), "{s}");
         assert!(!s.contains("showAudio"), "{s}");
         assert!(!s.contains("allowDownload"), "{s}");
+        assert!(!s.contains("defaultMuteLocal"), "{s}");
+        assert!(!s.contains("defaultMuteRemote"), "{s}");
         assert!(!s.contains("password"), "{s}");
         assert!(!s.contains("expiresAt"), "{s}");
     }
@@ -1261,6 +1290,8 @@ mod tests {
             show_transcript: Some(false),
             show_audio: Some(true),
             allow_download: Some(true),
+            default_mute_local: Some(false),
+            default_mute_remote: Some(true),
             password: None,
             expires_at: None,
         };
@@ -1269,6 +1300,10 @@ mod tests {
         assert!(s.contains("\"showTranscript\":false"), "{s}");
         assert!(s.contains("\"showAudio\":true"), "{s}");
         assert!(s.contains("\"allowDownload\":true"), "{s}");
+        // The owner muted their own side by default but left the other
+        // party audible — both ride the wire as camelCase booleans.
+        assert!(s.contains("\"defaultMuteLocal\":false"), "{s}");
+        assert!(s.contains("\"defaultMuteRemote\":true"), "{s}");
     }
 
     #[test]
@@ -1281,6 +1316,8 @@ mod tests {
             show_transcript: None,
             show_audio: None,
             allow_download: None,
+            default_mute_local: None,
+            default_mute_remote: None,
             password: None,
             expires_at: None,
         };
@@ -1319,7 +1356,9 @@ mod tests {
             "partyMasking": "full",
             "showTranscript": true,
             "showAudio": false,
-            "allowDownload": false
+            "allowDownload": false,
+            "defaultMuteLocal": false,
+            "defaultMuteRemote": true
         }"#;
         let parsed: ShareStateResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.visibility, ShareVisibility::Restricted);
@@ -1339,6 +1378,9 @@ mod tests {
         assert_eq!(parsed.show_audio, Some(false));
         // Audio hidden here, so download comes back off (platform folds the two).
         assert_eq!(parsed.allow_download, Some(false));
+        // Per-channel playback defaults ride back too.
+        assert_eq!(parsed.default_mute_local, Some(false));
+        assert_eq!(parsed.default_mute_remote, Some(true));
     }
 
     #[test]
@@ -1366,6 +1408,8 @@ mod tests {
             show_transcript: None,
             show_audio: None,
             allow_download: None,
+            default_mute_local: None,
+            default_mute_remote: None,
             password: None,
             expires_at: None,
         };
