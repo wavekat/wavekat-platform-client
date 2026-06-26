@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.15...v0.0.16) - 2026-06-26
+
+### Added
+
+- *(voice)* add per-channel default-mute to share ([#31](https://github.com/wavekat/wavekat-platform-client/pull/31))
+
 ## [0.0.15](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.14...v0.0.15) - 2026-06-24
 
 ### Added
