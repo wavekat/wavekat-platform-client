@@ -57,6 +57,13 @@ pub enum VoiceCallEndReason {
     RejectedRemote,
     Missed,
     CancelledLocal,
+    /// We blind-transferred the call to a third party (RFC 3515) and
+    /// dropped our own leg once the target answered. Distinct from
+    /// `HangupLocal`: the user didn't hang up, they handed the call off.
+    /// The destination is carried alongside in
+    /// [`VoiceCallRecord::transfer_target`]. Rows with this reason still
+    /// carry [`VoiceCallDisposition::Answered`].
+    TransferredLocal,
     /// An established call torn down because its connection died —
     /// the daemon's RFC 4028 session keepalive stopped getting
     /// answers (peer crashed, NAT binding dropped). Distinct from
@@ -112,6 +119,13 @@ pub struct VoiceCallRecord {
     /// appears here — an unshared call is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_visibility: Option<ShareVisibility>,
+    /// Where a transferred call was sent — the number or SIP address the
+    /// far end was asked to call (RFC 3515 `Refer-To`). Set only when
+    /// `end_reason == TransferredLocal`; `None` for every other call.
+    /// Unlike `share_visibility` this is daemon-owned data, so it *is*
+    /// sent on sync (serialized when present) and echoed back on read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_target: Option<String>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -864,6 +878,7 @@ mod tests {
             end_reason: VoiceCallEndReason::HangupRemote,
             error: None,
             share_visibility: None,
+            transfer_target: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -874,6 +889,12 @@ mod tests {
         assert!(s.contains("\"durationMs\":55000"), "{s}");
         // Optional `error` is None — should be omitted from the wire.
         assert!(!s.contains("\"error\""), "error should be omitted: {s}");
+        // Optional `transferTarget` is None here — omitted from the wire,
+        // exactly like a non-transferred call ships.
+        assert!(
+            !s.contains("\"transferTarget\""),
+            "transferTarget should be omitted: {s}"
+        );
         // Envelope flattens to the top of the object — schemaVersion
         // sits next to the other fields rather than nested under
         // "envelope". Future resources rely on this layout.
@@ -946,6 +967,7 @@ mod tests {
             VoiceCallEndReason::RejectedRemote,
             VoiceCallEndReason::Missed,
             VoiceCallEndReason::CancelledLocal,
+            VoiceCallEndReason::TransferredLocal,
             VoiceCallEndReason::ConnectionLost,
             VoiceCallEndReason::Failed,
         ] {
@@ -962,6 +984,41 @@ mod tests {
         // upload from a session-timer teardown bounce with a 400.
         let s = serde_json::to_string(&VoiceCallEndReason::ConnectionLost).unwrap();
         assert_eq!(s, "\"connection_lost\"");
+    }
+
+    #[test]
+    fn transferred_local_pins_its_wire_string() {
+        // Same contract as `connection_lost`: the platform validates
+        // against an exact string list, so a rename here would bounce
+        // every transferred-call upload with a 400.
+        let s = serde_json::to_string(&VoiceCallEndReason::TransferredLocal).unwrap();
+        assert_eq!(s, "\"transferred_local\"");
+    }
+
+    #[test]
+    fn record_round_trips_transfer_target() {
+        // A transferred call carries `transferTarget` both ways — the
+        // daemon ships it (it's its own data, not read-only decoration),
+        // and the platform echoes it back on read.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "Alice <sip:alice@example.com>",
+            "ringAt": "2026-06-28T10:00:00Z",
+            "answerAt": "2026-06-28T10:00:05Z",
+            "endAt": "2026-06-28T10:00:30Z",
+            "durationMs": 25000,
+            "disposition": "answered",
+            "endReason": "transferred_local",
+            "transferTarget": "1002"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.end_reason, VoiceCallEndReason::TransferredLocal);
+        assert_eq!(parsed.transfer_target.as_deref(), Some("1002"));
+        // And it survives a re-serialize (daemon → platform direction).
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(s.contains("\"transferTarget\":\"1002\""), "{s}");
     }
 
     #[test]
