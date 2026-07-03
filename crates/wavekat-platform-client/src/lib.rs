@@ -58,8 +58,9 @@ pub use token::Token;
 pub use voice::{
     InstallHeartbeatRequest, InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest,
     ShareRecordingResponse, ShareVisibility, SystemInfo, VoiceAccountRecord, VoiceAccounts,
-    VoiceAccountsQuery, VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason,
-    VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem,
-    VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
-    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport,
+    VoiceAccountsQuery, VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition,
+    VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceRecordingRecord,
+    VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
+    VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    VoiceTransport,
 };

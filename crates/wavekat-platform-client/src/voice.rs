@@ -73,6 +73,26 @@ pub enum VoiceCallEndReason {
     Failed,
 }
 
+/// The audio codec a call negotiated, stamped once audio flows. Wire-
+/// stable snake_case strings matching the daemon's `CallCodec` enum —
+/// the platform validates against this exact list, so a rename here
+/// would bounce every upload with a 400. New codecs (e.g. `ilbc`) are
+/// wire additions, not replacements.
+///
+/// Consumers render this as a quality tier ("HD" for Opus, "Standard"
+/// for the G.711 pair), not the codec name alone — see the desktop
+/// client's call-details page for the canonical presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCallCodec {
+    /// Opus wideband (16 kHz) — the "HD" tier.
+    Opus,
+    /// G.711 µ-law — the narrowband "Standard" tier.
+    Pcmu,
+    /// G.711 A-law — the narrowband "Standard" tier.
+    Pcma,
+}
+
 /// One historical call as it crosses the wire from the daemon up to the
 /// platform.
 ///
@@ -126,6 +146,13 @@ pub struct VoiceCallRecord {
     /// sent on sync (serialized when present) and echoed back on read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_target: Option<String>,
+    /// The negotiated audio codec, present when the call reached the
+    /// audio-flowing state on a daemon new enough to record it; `None`
+    /// for never-answered calls and rows synced by older daemons. Like
+    /// `transfer_target` this is daemon-owned data, so it *is* sent on
+    /// sync (serialized when present) and echoed back on read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<VoiceCallCodec>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -879,6 +906,7 @@ mod tests {
             error: None,
             share_visibility: None,
             transfer_target: None,
+            codec: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -895,6 +923,9 @@ mod tests {
             !s.contains("\"transferTarget\""),
             "transferTarget should be omitted: {s}"
         );
+        // Optional `codec` is None (never-answered call, or an older
+        // daemon) — omitted from the wire, never `null`.
+        assert!(!s.contains("\"codec\""), "codec should be omitted: {s}");
         // Envelope flattens to the top of the object — schemaVersion
         // sits next to the other fields rather than nested under
         // "envelope". Future resources rely on this layout.
@@ -1019,6 +1050,54 @@ mod tests {
         // And it survives a re-serialize (daemon → platform direction).
         let s = serde_json::to_string(&parsed).unwrap();
         assert!(s.contains("\"transferTarget\":\"1002\""), "{s}");
+    }
+
+    #[test]
+    fn codec_pins_its_wire_strings() {
+        // The platform's sync endpoint validates the codec against an
+        // exact string list, and the daemon's `CallCodec::as_str` emits
+        // these same strings — a rename here would bounce every upload
+        // from an answered call with a 400.
+        for (codec, wire) in [
+            (VoiceCallCodec::Opus, "\"opus\""),
+            (VoiceCallCodec::Pcmu, "\"pcmu\""),
+            (VoiceCallCodec::Pcma, "\"pcma\""),
+        ] {
+            assert_eq!(serde_json::to_string(&codec).unwrap(), wire);
+            let back: VoiceCallCodec = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, codec);
+        }
+    }
+
+    #[test]
+    fn record_round_trips_codec() {
+        // An answered call carries `codec` both ways — the daemon ships
+        // it (its own data, like transferTarget), and the platform
+        // echoes it back on read so the website can show the call's
+        // audio quality.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "Alice <sip:alice@example.com>",
+            "ringAt": "2026-07-03T10:00:00Z",
+            "answerAt": "2026-07-03T10:00:05Z",
+            "endAt": "2026-07-03T10:00:30Z",
+            "durationMs": 25000,
+            "disposition": "answered",
+            "endReason": "hangup_remote",
+            "codec": "opus"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.codec, Some(VoiceCallCodec::Opus));
+        // And it survives a re-serialize (daemon → platform direction).
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(s.contains("\"codec\":\"opus\""), "{s}");
+
+        // A row from an older daemon has no codec — reads as None.
+        let legacy = raw.replace(",\n            \"codec\": \"opus\"", "");
+        let parsed: VoiceCallRecord = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed.codec, None);
     }
 
     #[test]
