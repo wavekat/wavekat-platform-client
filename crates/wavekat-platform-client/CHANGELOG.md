@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.17...v0.0.18) - 2026-07-03
+
+### Added
+
+- *(voice)* add negotiated codec to call records ([#35](https://github.com/wavekat/wavekat-platform-client/pull/35))
+
 ## [0.0.17](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.16...v0.0.17) - 2026-06-28
 
 ### Added
