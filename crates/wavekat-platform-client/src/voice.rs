@@ -457,6 +457,70 @@ impl HasSyncEnvelope for VoiceAccountRecord {
     }
 }
 
+// ---- VoiceFlows (published pull) -------------------------------------------
+//
+// The daemon-facing pull leg of the call-flow ("Receptionist") system —
+// `wavekat-voice/docs/48-ivr-call-flows.md`'s control-plane split. Flows
+// are *authored* on the platform (drafts, publish gate, version
+// history); the daemon only ever reads the published snapshots, caches
+// them locally, and runs them offline. There is no upload direction, so
+// this is not a `SyncEndpoint` (that trait models the `{resource}/sync`
+// + list pair): it's a single typed GET, like the share commands above.
+
+/// One published call-flow snapshot as served by
+/// `GET /api/voice/flows/published`: the latest published version of a
+/// flow the bearer authored. The YAML carries the platform-stamped
+/// `id`/`name`/`version` and is served verbatim — the daemon re-parses
+/// and re-validates it on load rather than trusting the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceFlowRecord {
+    /// Platform-assigned flow id (`flow_…`), stable across versions.
+    pub id: String,
+    pub name: String,
+    /// Latest published version number (1-based, bumps on publish).
+    pub version: u32,
+    /// The immutable published document, verbatim.
+    pub yaml: String,
+    /// RFC 3339 time this version was published.
+    pub published_at: String,
+}
+
+/// Query params for `GET /api/voice/flows/published`. Cursor-paginated
+/// by flow id ascending; pass the previous page's `next_after` until it
+/// comes back `None` to collect the full set. The full set is what the
+/// daemon's reconcile wants — a cached flow absent from a complete pull
+/// was deleted on the platform.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceFlowsQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Page size, server-capped at 100. `None` = server default (50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One page of published flow snapshots.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceFlowsPage {
+    pub items: Vec<VoiceFlowRecord>,
+    /// Cursor for the next page; `None` = end of the set.
+    #[serde(default)]
+    pub next_after: Option<String>,
+}
+
+impl Client {
+    /// `GET /api/voice/flows/published` — one page of the caller's
+    /// published flow snapshots (latest version each). Strictly
+    /// creator-scoped server-side; never returns another user's flows.
+    pub async fn published_flows(&self, query: &VoiceFlowsQuery) -> Result<VoiceFlowsPage> {
+        self.get_json_query::<VoiceFlowsPage, _>("/api/voice/flows/published", query)
+            .await
+    }
+}
+
 // ---- Anonymous install heartbeat ------------------------------------------
 //
 // A first-run / per-launch ping the desktop daemon fires *before* (and
@@ -1672,6 +1736,47 @@ mod tests {
             with_deleted.contains("\"includeDeleted\":true"),
             "{with_deleted}"
         );
+    }
+
+    // ---- VoiceFlows ----
+
+    #[test]
+    fn flows_query_serializes_cursor_and_omits_absent_fields() {
+        let empty = serde_json::to_string(&VoiceFlowsQuery::default()).unwrap();
+        assert_eq!(empty, "{}");
+        let cursored = serde_json::to_string(&VoiceFlowsQuery {
+            after: Some("flow_abc".into()),
+            limit: Some(100),
+        })
+        .unwrap();
+        assert!(cursored.contains("\"after\":\"flow_abc\""), "{cursored}");
+        assert!(cursored.contains("\"limit\":100"), "{cursored}");
+    }
+
+    #[test]
+    fn flows_page_parses_platform_shape() {
+        let raw = r#"{
+            "items": [{
+                "id": "flow_1",
+                "name": "Luigi's — after hours",
+                "version": 3,
+                "yaml": "schema_version: 1\n",
+                "publishedAt": "2026-07-13T10:00:00Z"
+            }],
+            "nextAfter": null
+        }"#;
+        let page: VoiceFlowsPage = serde_json::from_str(raw).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let rec = &page.items[0];
+        assert_eq!(rec.id, "flow_1");
+        assert_eq!(rec.version, 3);
+        assert_eq!(rec.published_at, "2026-07-13T10:00:00Z");
+        assert!(page.next_after.is_none());
+
+        // A mid-walk page carries the cursor.
+        let more: VoiceFlowsPage =
+            serde_json::from_str(r#"{ "items": [], "nextAfter": "flow_1" }"#).unwrap();
+        assert_eq!(more.next_after.as_deref(), Some("flow_1"));
     }
 
     #[test]
