@@ -59,8 +59,8 @@ pub use voice::{
     InstallHeartbeatRequest, InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest,
     ShareRecordingResponse, ShareVisibility, SystemInfo, VoiceAccountRecord, VoiceAccounts,
     VoiceAccountsQuery, VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition,
-    VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceRecordingRecord,
-    VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
-    VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
-    VoiceTransport,
+    VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceFlowRecord,
+    VoiceFlowsPage, VoiceFlowsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings,
+    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
+    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport,
 };
