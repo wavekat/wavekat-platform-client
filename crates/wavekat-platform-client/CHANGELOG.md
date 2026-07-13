@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.18...v0.0.19) - 2026-07-13
+
+### Added
+
+- *(voice)* published call-flows pull endpoint (doc 48) ([#37](https://github.com/wavekat/wavekat-platform-client/pull/37))
+
 ## [0.0.18](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.17...v0.0.18) - 2026-07-03
 
 ### Added
