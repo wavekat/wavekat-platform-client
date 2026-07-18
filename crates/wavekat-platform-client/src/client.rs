@@ -281,6 +281,21 @@ impl Client {
         sink.flush().await?;
         Ok(written)
     }
+
+    /// `GET {path}` returning the raw response body in memory. For small
+    /// binary payloads a caller wants as a `Vec<u8>` — e.g. a frozen
+    /// flow-audio clip (tens of KB) to hand to an atomic on-disk writer.
+    /// For large streams prefer [`Client::get_stream_to`].
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let url = self.url(path);
+        let resp = self.inner.get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_error(status.as_u16(), url, body));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
 }
 
 async fn decode<T: DeserializeOwned>(url: String, resp: reqwest::Response) -> Result<T> {
