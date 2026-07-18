@@ -511,6 +511,40 @@ pub struct VoiceFlowsPage {
     pub next_after: Option<String>,
 }
 
+/// One frozen audio asset of a published flow version, as served by
+/// `GET /api/voice/flows/{id}/versions/{version}/assets` (wavekat-platform
+/// docs 16/17). The bytes were copied into a version-owned R2 object at
+/// publish time and never change, so `content_hash` identifies them
+/// exactly — the daemon diffs its local cache against it rather than
+/// trusting a bare filename, because the *same* `ref` can carry different
+/// bytes across two versions of the same flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceFlowVersionAsset {
+    /// The `vprompt_…` reference exactly as it appears in the flow YAML.
+    #[serde(rename = "ref")]
+    pub asset_ref: String,
+    /// Source telephony format the clip was frozen as (`ulaw_8000`,
+    /// `pcm_16000`, `mp3`, …); the container is WAV unless `mp3`.
+    pub format: String,
+    /// Size of the frozen bytes.
+    pub byte_size: u64,
+    /// Clip duration if the platform knew it at freeze time.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// sha256 of the frozen bytes — the cache's content key.
+    pub content_hash: String,
+}
+
+/// The frozen-asset manifest for one published version. Not paginated:
+/// a flow's asset count is bounded by its node count (a phone tree is
+/// tens of clips), so the platform returns them all in one response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceFlowAssetsPage {
+    pub assets: Vec<VoiceFlowVersionAsset>,
+}
+
 impl Client {
     /// `GET /api/voice/flows/published` — one page of the caller's
     /// published flow snapshots (latest version each). Strictly
@@ -518,6 +552,36 @@ impl Client {
     pub async fn published_flows(&self, query: &VoiceFlowsQuery) -> Result<VoiceFlowsPage> {
         self.get_json_query::<VoiceFlowsPage, _>("/api/voice/flows/published", query)
             .await
+    }
+
+    /// `GET /api/voice/flows/{id}/versions/{version}/assets` — the frozen
+    /// audio manifest for one published version (docs 16/17). Flow-scoped
+    /// server-side: a version of a flow the caller doesn't own is a 404,
+    /// never another user's assets. An existing, visible version with no
+    /// generated audio returns an empty manifest.
+    pub async fn flow_version_assets(
+        &self,
+        flow_id: &str,
+        version: u32,
+    ) -> Result<VoiceFlowAssetsPage> {
+        let path = format!("/api/voice/flows/{flow_id}/versions/{version}/assets");
+        self.get_json::<VoiceFlowAssetsPage>(&path).await
+    }
+
+    /// `GET /api/voice/flows/{id}/versions/{version}/assets/{ref}/bytes` —
+    /// the immutable frozen copy of one clip, served from the version's own
+    /// asset set (never the mutable library). Returned in memory because a
+    /// clip is tens of KB and the daemon writes it atomically into its
+    /// on-disk cache; same flow-scoped 404 as the manifest.
+    pub async fn flow_version_asset_bytes(
+        &self,
+        flow_id: &str,
+        version: u32,
+        asset_ref: &str,
+    ) -> Result<Vec<u8>> {
+        let path =
+            format!("/api/voice/flows/{flow_id}/versions/{version}/assets/{asset_ref}/bytes");
+        self.get_bytes(&path).await
     }
 }
 
@@ -1777,6 +1841,33 @@ mod tests {
         let more: VoiceFlowsPage =
             serde_json::from_str(r#"{ "items": [], "nextAfter": "flow_1" }"#).unwrap();
         assert_eq!(more.next_after.as_deref(), Some("flow_1"));
+    }
+
+    #[test]
+    fn flow_assets_manifest_parses_platform_shape() {
+        // `ref` (a reserved word) maps to `asset_ref`; a null duration is
+        // accepted (the platform doesn't always know it).
+        let raw = r#"{
+            "assets": [{
+                "ref": "vprompt_ab12cd34",
+                "format": "ulaw_8000",
+                "byteSize": 48044,
+                "durationMs": null,
+                "contentHash": "9f2c00aa"
+            }]
+        }"#;
+        let page: VoiceFlowAssetsPage = serde_json::from_str(raw).unwrap();
+        assert_eq!(page.assets.len(), 1);
+        let asset = &page.assets[0];
+        assert_eq!(asset.asset_ref, "vprompt_ab12cd34");
+        assert_eq!(asset.format, "ulaw_8000");
+        assert_eq!(asset.byte_size, 48044);
+        assert!(asset.duration_ms.is_none());
+        assert_eq!(asset.content_hash, "9f2c00aa");
+
+        // A text-only version legitimately has no frozen audio.
+        let empty: VoiceFlowAssetsPage = serde_json::from_str(r#"{ "assets": [] }"#).unwrap();
+        assert!(empty.assets.is_empty());
     }
 
     #[test]
