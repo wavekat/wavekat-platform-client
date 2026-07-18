@@ -61,7 +61,7 @@ pub use voice::{
     VoiceAccountsQuery, VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition,
     VoiceCallEndReason, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceFlowAssetsPage,
     VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage, VoiceFlowsQuery, VoiceRecordingRecord,
-    VoiceRecordingSyncItem, VoiceRecordings,
-    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
-    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport,
+    VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
+    VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    VoiceTransport,
 };
