@@ -93,6 +93,34 @@ pub enum VoiceCallCodec {
     Pcma,
 }
 
+/// How a call flow's ("receptionist") run ended, folded by the daemon
+/// from the run's terminal trace step. Wire-stable snake_case strings
+/// matching `wavekat_flow::trace::FlowOutcome` — declared here rather
+/// than re-exported so this crate stays free of a `wavekat-flow`
+/// dependency; the two lists must be kept in step.
+///
+/// Consumers prefer this over [`VoiceCallEndReason`] when rendering a
+/// flow-answered call's outcome: the flow's own goodbye sends the BYE,
+/// so the SIP-level reason reads `HangupLocal` ("you hung up") for a
+/// call the user never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCallFlowOutcome {
+    /// A `ring` node was answered by a human; the engine stepped out.
+    Answered,
+    /// A `message` node recorded a voicemail.
+    MessageLeft,
+    /// A `transfer` node handed the call to an external number.
+    Transferred,
+    /// A `hangup` node ended the call.
+    HungUp,
+    /// An effect failed mid-run (the call likely dropped).
+    Aborted,
+    /// The flow reached an impossible state. Validation is meant to
+    /// prevent this, so it signals a defect worth alerting on.
+    Defect,
+}
+
 /// One historical call as it crosses the wire from the daemon up to the
 /// platform.
 ///
@@ -153,6 +181,22 @@ pub struct VoiceCallRecord {
     /// sync (serialized when present) and echoed back on read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<VoiceCallCodec>,
+    /// Which call flow ("receptionist") answered this call, when one
+    /// did: the platform flow id the daemon held at answer time, and
+    /// the flow's display name *at that moment*. The name is shipped
+    /// verbatim rather than resolved from the flow on read, so a later
+    /// rename or delete doesn't rewrite what history says happened.
+    /// Both `None` for calls the user answered themselves. Daemon-owned
+    /// data like `codec`, so both are sent on sync and echoed on read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_name: Option<String>,
+    /// How the flow's run ended. `None` when no flow answered, and for
+    /// runs with no terminal step (the caller hung up mid-flow) — there
+    /// [`VoiceCallRecord::end_reason`] is already the honest story.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_outcome: Option<VoiceCallFlowOutcome>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -1035,6 +1079,9 @@ mod tests {
             share_visibility: None,
             transfer_target: None,
             codec: None,
+            flow_id: None,
+            flow_name: None,
+            flow_outcome: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -1226,6 +1273,90 @@ mod tests {
         let legacy = raw.replace(",\n            \"codec\": \"opus\"", "");
         let parsed: VoiceCallRecord = serde_json::from_str(&legacy).unwrap();
         assert_eq!(parsed.codec, None);
+    }
+
+    #[test]
+    fn flow_outcome_pins_its_wire_strings() {
+        // Three parties agree on these exact strings: the daemon's
+        // `flow_outcome_to_str`, `wavekat_flow::trace::FlowOutcome`'s
+        // snake_case serde, and the platform's zod enum. A rename here
+        // 400s every flow-answered call's batch.
+        for (outcome, wire) in [
+            (VoiceCallFlowOutcome::Answered, "\"answered\""),
+            (VoiceCallFlowOutcome::MessageLeft, "\"message_left\""),
+            (VoiceCallFlowOutcome::Transferred, "\"transferred\""),
+            (VoiceCallFlowOutcome::HungUp, "\"hung_up\""),
+            (VoiceCallFlowOutcome::Aborted, "\"aborted\""),
+            (VoiceCallFlowOutcome::Defect, "\"defect\""),
+        ] {
+            assert_eq!(serde_json::to_string(&outcome).unwrap(), wire);
+            let back: VoiceCallFlowOutcome = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, outcome);
+        }
+    }
+
+    #[test]
+    fn record_round_trips_flow_attribution() {
+        // A flow-answered call carries which flow took it and how the
+        // run ended, both ways: the daemon ships them, the platform
+        // echoes them so the website can say "Answered by “X”" and show
+        // the run's own outcome instead of the misleading SIP one.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "Alice <sip:alice@example.com>",
+            "ringAt": "2026-07-03T10:00:00Z",
+            "answerAt": "2026-07-03T10:00:05Z",
+            "endAt": "2026-07-03T10:00:30Z",
+            "durationMs": 25000,
+            "disposition": "answered",
+            "endReason": "hangup_local",
+            "flowId": "flow_after_hours",
+            "flowName": "After hours",
+            "flowOutcome": "message_left"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.flow_id.as_deref(), Some("flow_after_hours"));
+        assert_eq!(parsed.flow_name.as_deref(), Some("After hours"));
+        assert_eq!(parsed.flow_outcome, Some(VoiceCallFlowOutcome::MessageLeft));
+
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(s.contains("\"flowId\":\"flow_after_hours\""), "{s}");
+        assert!(s.contains("\"flowName\":\"After hours\""), "{s}");
+        assert!(s.contains("\"flowOutcome\":\"message_left\""), "{s}");
+    }
+
+    #[test]
+    fn record_omits_flow_fields_for_a_human_answered_call() {
+        // Calls the user took themselves — and every row from a daemon
+        // predating call flows — carry none of the three. They must
+        // stay off the wire entirely, not serialize as nulls.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "sip:alice@example.com",
+            "ringAt": "2026-07-03T10:00:00Z",
+            "endAt": "2026-07-03T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_remote"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.flow_id, None);
+        assert_eq!(parsed.flow_name, None);
+        assert_eq!(parsed.flow_outcome, None);
+
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(!s.contains("\"flowId\""), "flowId should be omitted: {s}");
+        assert!(
+            !s.contains("\"flowName\""),
+            "flowName should be omitted: {s}"
+        );
+        assert!(
+            !s.contains("\"flowOutcome\""),
+            "flowOutcome should be omitted: {s}"
+        );
     }
 
     #[test]
