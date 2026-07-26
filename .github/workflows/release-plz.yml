@@ -17,9 +17,27 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: release-plz/action@v0.5
+
+      # Not release-plz/action: it installs release-plz via cargo-binstall, whose
+      # fetchers exceed their resolution deadline on this runner's slow egress and
+      # silently fall back to `cargo install` from source (~8.5 min every run).
+      # install-action downloads the prebuilt binary instead (~10s). `fallback: none`
+      # keeps a version missing from install-action's manifest a hard failure rather
+      # than a silent return to the source build.
+      - uses: taiki-e/install-action@v2
         with:
-          command: release
+          tool: release-plz@0.3.160,cargo-semver-checks@0.48
+          fallback: none
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run release-plz
+        run: |
+          release_output=$(release-plz release --git-token "$GITHUB_TOKEN" -o json)
+          echo "release_output: $release_output"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
