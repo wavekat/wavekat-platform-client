@@ -83,6 +83,26 @@ breaks ship as a new endpoint pair under a new `RESOURCE` segment.
 Design rationale and the calls-first slice that established the
 pattern: see [`wavekat-voice/docs/21-platform-call-history-sync.md`](https://github.com/wavekat/wavekat-voice/blob/main/docs/21-platform-call-history-sync.md).
 
+### This crate is the middle of a three-repo release train
+
+A new field on a `Record` is never a one-repo change, and the order is
+fixed — **the platform must accept a field before any client sends it**:
+
+1. `wavekat-platform` — migration + route accepts the field. Deploys
+   safely on its own; every row is null until clients catch up.
+2. **Here** — add the optional field, then **cut a release**. A consumer
+   can't use it from git; it needs the published version.
+3. `wavekat-voice` (or whichever consumer) — map the field and bump its
+   dep to the version from step 2.
+
+So landing a field here without releasing leaves consumers stuck: their
+change won't build (`cargo` can't select the unreleased version). Don't
+merge step 2 and then walk away — the release *is* the deliverable.
+
+Consumers must not paper over this with a `[patch.crates-io]` pointing
+at a local checkout. That's fine for local verification, never in a
+commit.
+
 ## What does NOT belong here
 
 - **Credential storage policy.** Consumers pick: `wavekat-cli` writes a JSON file at `~/.config/wavekat/auth.json`; `wavekat-voice` uses the OS keychain via the `keyring` crate. The crate's surface takes a `token: String` and returns one — it never reads or writes disk.
