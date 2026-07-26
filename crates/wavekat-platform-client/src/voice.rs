@@ -121,6 +121,51 @@ pub enum VoiceCallFlowOutcome {
     Defect,
 }
 
+/// One step of a call flow's run, as the daemon projects it from its
+/// local `call_flow_step` events.
+///
+/// Deliberately structural rather than a rendered sentence. The daemon
+/// has an English summary for each step, but the platform's web UI
+/// serves nine locales — shipping prose would make these permanently
+/// untranslatable there. Consumers get the parts and compose the
+/// sentence themselves.
+///
+/// `kind` is a plain `String`, not an enum, and that is the point: step
+/// kinds grow every time the flow engine gains a node type, and a
+/// consumer built against an older version of this crate must still be
+/// able to deserialize a newer daemon's trace. An unknown kind is
+/// rendered as an unnamed marker rather than rejected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceCallFlowStep {
+    /// Milliseconds from the call's answer time — the same zero the
+    /// recording starts at, so a step lines up with the audio.
+    pub at_ms: i64,
+    /// The engine's step tag: `spoke`, `hours`, `menu_choice`,
+    /// `menu_no_input`, `menu_invalid`, `ring`, `message_recorded`,
+    /// `transferred`, `hung_up`, or the synthetic `answered` marking a
+    /// mid-run take-over by the owner.
+    pub kind: String,
+    /// The flow node this step belongs to, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The key the caller pressed — `menu_choice` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digit: Option<String>,
+    /// Recorded message length in seconds — `message_recorded` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secs: Option<i64>,
+    /// Where the call was sent — `transferred` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Whether an hours check landed inside business hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
+    /// Whether a `ring` step was picked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<bool>,
+}
+
 /// One historical call as it crosses the wire from the daemon up to the
 /// platform.
 ///
@@ -197,6 +242,17 @@ pub struct VoiceCallRecord {
     /// [`VoiceCallRecord::end_reason`] is already the honest story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_outcome: Option<VoiceCallFlowOutcome>,
+    /// The flow run's step-by-step trace, in answer-time order. Drives
+    /// the markers the platform's call-detail page draws on the
+    /// recording waveform.
+    ///
+    /// `None` for human-answered calls and for daemons predating the
+    /// trace. Sent on sync like the other daemon-owned fields, but
+    /// echoed back only on the *detail* read (`GET /api/voice/calls/
+    /// {sourceId}`) — the list route omits it, since nothing on a list
+    /// row renders a trace and it would weigh down every page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_steps: Option<Vec<VoiceCallFlowStep>>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -1082,6 +1138,7 @@ mod tests {
             flow_id: None,
             flow_name: None,
             flow_outcome: None,
+            flow_steps: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -1325,6 +1382,73 @@ mod tests {
         assert!(s.contains("\"flowId\":\"flow_after_hours\""), "{s}");
         assert!(s.contains("\"flowName\":\"After hours\""), "{s}");
         assert!(s.contains("\"flowOutcome\":\"message_left\""), "{s}");
+    }
+
+    #[test]
+    fn record_round_trips_a_flow_step_trace() {
+        // Pins the per-step field names. These are consumed by the
+        // platform's Zod schema on one side and produced by the daemon's
+        // projection on the other; a silent rename here breaks both.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "sip:alice@example.com",
+            "ringAt": "2026-07-03T10:00:00Z",
+            "answerAt": "2026-07-03T10:00:05Z",
+            "endAt": "2026-07-03T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_local",
+            "flowId": "f",
+            "flowName": "F",
+            "flowSteps": [
+                { "atMs": 0, "kind": "spoke", "node": "greeting" },
+                { "atMs": 4200, "kind": "menu_choice", "digit": "2" },
+                { "atMs": 9100, "kind": "message_recorded", "secs": 31 }
+            ]
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        let steps = parsed.flow_steps.as_deref().expect("steps present");
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[1].kind, "menu_choice");
+        assert_eq!(steps[1].digit.as_deref(), Some("2"));
+        assert_eq!(steps[2].secs, Some(31));
+        // Absent per-step fields stay absent rather than serializing as
+        // nulls — same contract as the record's own optional fields.
+        let s = serde_json::to_string(&steps[0]).unwrap();
+        assert_eq!(s, r#"{"atMs":0,"kind":"spoke","node":"greeting"}"#);
+    }
+
+    #[test]
+    fn flow_step_accepts_a_kind_this_build_does_not_know() {
+        // The whole reason `kind` is a String. A consumer pinned to an
+        // older crate version must still deserialize a newer daemon's
+        // trace — rejecting would fail the entire call record, not one
+        // step.
+        let step: VoiceCallFlowStep =
+            serde_json::from_str(r#"{"atMs": 10, "kind": "consulted_the_oracle"}"#).unwrap();
+        assert_eq!(step.kind, "consulted_the_oracle");
+        assert_eq!(step.digit, None);
+    }
+
+    #[test]
+    fn record_omits_flow_steps_for_a_human_answered_call() {
+        // A call the user took themselves has no trace. The field must
+        // stay off the wire entirely rather than serializing as null.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "inbound",
+            "party": "sip:alice@example.com",
+            "ringAt": "2026-07-03T10:00:00Z",
+            "endAt": "2026-07-03T10:00:30Z",
+            "disposition": "answered",
+            "endReason": "hangup_local"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert!(parsed.flow_steps.is_none());
+        let s = serde_json::to_string(&parsed).unwrap();
+        assert!(!s.contains("flowSteps"), "{s}");
     }
 
     #[test]
