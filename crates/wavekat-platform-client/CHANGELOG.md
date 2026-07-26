@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.20...v0.0.21) - 2026-07-26
+
+### Added
+
+- *(voice)* add call-flow attribution to call records ([#41](https://github.com/wavekat/wavekat-platform-client/pull/41))
+
 ## [0.0.20](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.19...v0.0.20) - 2026-07-18
 
 ### Added
