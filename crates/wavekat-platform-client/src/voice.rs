@@ -253,6 +253,36 @@ pub struct VoiceCallRecord {
     /// row renders a trace and it would weigh down every page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_steps: Option<Vec<VoiceCallFlowStep>>,
+    /// RFC 3339 soft-delete tombstone. `None` = live; `Some` = the user
+    /// deleted this call at that time.
+    ///
+    /// Calls are otherwise immutable one-way pushes, and this is the
+    /// single exception: a delete has to reach the platform somehow, and
+    /// a hard `DELETE` can't sync under a "push the row" model — once
+    /// the row is gone there's nothing left to push. So a delete rides
+    /// as an ordinary upsert with this field set, exactly like
+    /// [`VoiceAccountRecord::deleted_at`].
+    ///
+    /// Where it differs from the account tombstone: **the platform
+    /// treats this one as sticky, not last-write-wins.** An account is
+    /// genuinely mutable, so it carries `updated_at` and conflicts
+    /// resolve on it; a call has no such field because delete is the
+    /// only mutation it has. The platform resolves the column
+    /// `COALESCE(existing, incoming)`, so once a call is deleted a
+    /// later sync of the same `source_id` can never revive it — which
+    /// also means a consumer must not expect to "undelete" by syncing
+    /// the row again with `None`.
+    ///
+    /// Deleting a call is not only a flag on the platform side: the
+    /// recording bytes are removed from object storage, the recording
+    /// and transcript rows are dropped, and any live share link is
+    /// revoked (it answers 410 thereafter). The tombstone row is
+    /// retained so a late-syncing device still learns about the delete
+    /// — read it via `include_deleted` on
+    /// [`VoiceCallsQuery`]. `GET /api/voice/calls/{sourceId}` returns
+    /// 404 for a deleted call rather than echoing the tombstone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
     /// Version + forward-compat fields shared by every sync record.
     /// Flattened so `schemaVersion` and `extras` sit at the top of
     /// the JSON object alongside the other columns. See
@@ -267,6 +297,18 @@ pub struct VoiceCallRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceCallsQuery {
+    /// Include soft-deleted tombstones in the response. Absent / false
+    /// returns only live calls — what a human-facing list wants. A
+    /// delta-syncing device sets this `true` to learn about deletes
+    /// made on another device or on the web, so it can reap its local
+    /// copy.
+    ///
+    /// Unlike [`VoiceAccountsQuery::include_deleted`] there is no
+    /// "restore a fresh device" use for this: a tombstoned call has had
+    /// its recording and transcript destroyed, so the only thing left
+    /// to learn from it is that it's gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_deleted: Option<bool>,
     /// RFC 3339 cursor; rows with `end_at < before` are returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
@@ -1139,6 +1181,7 @@ mod tests {
             flow_name: None,
             flow_outcome: None,
             flow_steps: None,
+            deleted_at: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -1168,6 +1211,85 @@ mod tests {
         // `extras` is None, so the envelope contributes no `extras`
         // key. Stays out of the row to keep the small/fast path.
         assert!(!s.contains("\"extras\""), "extras should be omitted: {s}");
+        // A live call omits the tombstone entirely rather than sending
+        // `null` — every ordinary sync is a live call, so this is the
+        // common path and it should stay off the wire.
+        assert!(
+            !s.contains("\"deletedAt\""),
+            "deletedAt should be omitted on a live call: {s}"
+        );
+    }
+
+    #[test]
+    fn call_tombstone_serializes_deleted_at() {
+        // The delete-propagation mechanism: a deleted call rides up as
+        // an ordinary upsert with `deletedAt` set (platform docs/22),
+        // the same shape the account tombstone uses.
+        let mut r = VoiceCallRecord {
+            source_id: "11111111-1111-4111-8111-111111111111".into(),
+            account_id: "22222222-2222-4222-8222-222222222222".into(),
+            direction: VoiceCallDirection::Inbound,
+            party: "+14155550123".into(),
+            ring_at: "2026-05-16T10:00:00Z".into(),
+            answer_at: None,
+            end_at: "2026-05-16T10:01:00Z".into(),
+            duration_ms: None,
+            disposition: VoiceCallDisposition::Missed,
+            end_reason: VoiceCallEndReason::HangupRemote,
+            error: None,
+            share_visibility: None,
+            transfer_target: None,
+            codec: None,
+            flow_id: None,
+            flow_name: None,
+            flow_outcome: None,
+            flow_steps: None,
+            deleted_at: None,
+            envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
+        };
+        r.deleted_at = Some("2026-07-30T12:00:00Z".into());
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"deletedAt\":\"2026-07-30T12:00:00Z\""), "{s}");
+    }
+
+    #[test]
+    fn call_record_parses_without_deleted_at() {
+        // Reading back a live call from `GET /api/voice/calls`: the
+        // platform sends `deletedAt: null`, and a platform build
+        // predating the field sends nothing at all. Both must land as
+        // `None` rather than failing the whole page.
+        let raw = r#"{
+            "sourceId": "a",
+            "accountId": "b",
+            "direction": "outbound",
+            "party": "+14155550123",
+            "ringAt": "2026-05-16T10:00:00Z",
+            "endAt": "2026-05-16T10:01:00Z",
+            "disposition": "answered",
+            "endReason": "hangup_local"
+        }"#;
+        let parsed: VoiceCallRecord = serde_json::from_str(raw).unwrap();
+        assert!(parsed.deleted_at.is_none());
+
+        let with_null: VoiceCallRecord =
+            serde_json::from_str(&raw.replace('}', r#", "deletedAt": null }"#)).unwrap();
+        assert!(with_null.deleted_at.is_none());
+    }
+
+    #[test]
+    fn calls_query_serializes_include_deleted() {
+        // The delta-pull flag a device sets to learn about deletes made
+        // elsewhere. Omitted when unset, so an ordinary list request is
+        // unchanged.
+        let live = VoiceCallsQuery::default();
+        assert_eq!(serde_json::to_string(&live).unwrap(), "{}");
+
+        let delta = VoiceCallsQuery {
+            include_deleted: Some(true),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&delta).unwrap();
+        assert!(s.contains("\"includeDeleted\":true"), "{s}");
     }
 
     #[test]
