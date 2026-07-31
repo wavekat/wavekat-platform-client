@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.22...v0.0.23) - 2026-07-31
+
+### Added
+
+- *(voice)* add deleted_at to VoiceCallRecord ([#46](https://github.com/wavekat/wavekat-platform-client/pull/46))
+
 ## [0.0.22](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.21...v0.0.22) - 2026-07-26
 
 ### Added
