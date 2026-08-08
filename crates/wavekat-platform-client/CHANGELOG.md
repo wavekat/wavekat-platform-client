@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.23...v0.0.24) - 2026-08-08
+
+### Added
+
+- *(voice)* booking calls + schema negotiation ([#48](https://github.com/wavekat/wavekat-platform-client/pull/48))
+
 ## [0.0.23](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.22...v0.0.23) - 2026-07-31
 
 ### Added
