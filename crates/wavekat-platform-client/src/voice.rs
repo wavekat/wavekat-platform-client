@@ -641,6 +641,27 @@ pub struct VoiceFlowsQuery {
     /// Page size, server-capped at 100. `None` = server default (50).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The document versions this caller's flow engine can run —
+    /// `wavekat_flow::SUPPORTED_SCHEMA_VERSIONS`, comma-separated
+    /// ascending ("1,2"). The platform withholds documents in any other
+    /// version rather than serving one the caller would fail to parse.
+    ///
+    /// **Send it.** `None` does not mean "anything goes": the platform
+    /// reads a missing value as version 1 only, because this parameter
+    /// arrived alongside version 2 and a caller that omits it is an
+    /// older build. A client that can run a newer version and stays
+    /// quiet silently loses those flows.
+    //
+    // Explicitly renamed: the struct is camelCase overall, but this
+    // route's query parameter is `schema_versions`, and a silently
+    // camelCased key would be ignored by the server — which reads
+    // exactly like a platform that has no such flows.
+    #[serde(
+        rename = "schema_versions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub schema_versions: Option<String>,
 }
 
 /// One page of published flow snapshots.
@@ -724,6 +745,182 @@ impl Client {
         let path =
             format!("/api/voice/flows/{flow_id}/versions/{version}/assets/{asset_ref}/bytes");
         self.get_bytes(&path).await
+    }
+}
+
+// ---- Booking (mid-call, synchronous) ---------------------------------------
+//
+// The action plane of wavekat-platform's docs/30: a `book` step asking
+// "when is this business free?" and then "put the caller in at this
+// time", with the caller on the line.
+//
+// Unlike every other endpoint in this file, these are **synchronous and
+// in-call**. Nothing here is queued, batched or retried: a person is
+// waiting, so the platform answers within seconds or answers
+// `unavailable`, and the flow takes its fallback exit. Callers should
+// give these a short timeout of their own and treat expiry the same way
+// they treat `unavailable`.
+//
+// The calendar credential never reaches this crate. The platform holds
+// the connection and answers in times and outcomes — which is what makes
+// booking a pair of platform calls rather than a Google client in every
+// daemon.
+//
+// Wire note: these routes use `snake_case` bodies, unlike the camelCase
+// sync resources above, so these types carry no `rename_all`.
+
+/// One open window in a business's week, `"HH:MM"` 24-hour local time —
+/// the same shape the flow document's `hours`/`book` steps carry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingTimeRange {
+    pub open: String,
+    pub close: String,
+}
+
+/// Open windows per weekday. A missing or empty day is closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingSchedule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mon: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tue: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wed: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thu: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fri: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sat: Vec<BookingTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sun: Vec<BookingTimeRange>,
+}
+
+/// A single-date override of the weekly schedule (a holiday, or special
+/// hours).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingException {
+    /// `"YYYY-MM-DD"` in the schedule's own timezone.
+    pub date: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<BookingTimeRange>,
+}
+
+/// Body of `POST /api/voice/booking/slots`.
+///
+/// Everything except `source_id` comes straight off the flow document's
+/// `book` step; the platform holds no per-node configuration of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingSlotsRequest {
+    /// The call this offer belongs to (`voice_calls.source_id`). Slots
+    /// are held against it, which is what stops a caller being blocked
+    /// by their own offers — and what stops a second caller being
+    /// offered the same time.
+    pub source_id: String,
+    pub duration_mins: u32,
+    #[serde(default)]
+    pub buffer_mins: u32,
+    #[serde(default)]
+    pub lead_mins: u32,
+    #[serde(default)]
+    pub horizon_days: u32,
+    pub schedule: BookingSchedule,
+    /// IANA zone the schedule is written in.
+    pub timezone: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exceptions: Vec<BookingException>,
+    /// How many times to offer. The answer may be shorter, never longer.
+    pub limit: u32,
+}
+
+/// One offerable appointment, as absolute RFC 3339 instants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingSlot {
+    pub start: String,
+    pub end: String,
+}
+
+/// Answer to `POST /api/voice/booking/slots`.
+///
+/// `slots` empty is a real answer — the calendar is full, or the window
+/// closed — and not an error: the flow takes its no-slots exit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingSlotsResponse {
+    #[serde(default)]
+    pub slots: Vec<BookingSlot>,
+    /// The zone the times should be *spoken* in — the business's, echoed
+    /// back so the caller isn't told a time in the server's zone.
+    #[serde(default)]
+    pub timezone: String,
+    /// Set when the platform could not read the calendar at all
+    /// (`"unavailable"`); `slots` is then empty and the reason is for
+    /// logs, never for a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Body of `POST /api/voice/booking/book`.
+///
+/// Idempotent on `source_id`: a retried request for a call that already
+/// has an appointment answers `booked` with the existing event's start,
+/// without touching the calendar. A timed-out request is therefore safe
+/// to repeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingBookRequest {
+    pub source_id: String,
+    /// One of the `start`s `/slots` handed back, verbatim.
+    pub start: String,
+    pub duration_mins: u32,
+    pub timezone: String,
+    /// Who is booking, for the calendar entry. Empty when the call
+    /// carried no caller id.
+    #[serde(default)]
+    pub caller_number: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_name: Option<String>,
+}
+
+/// Answer to `POST /api/voice/booking/book`.
+///
+/// Three outcomes, and the flow does something different with each:
+/// `booked` continues, `slot_taken` can offer again, `unavailable` falls
+/// back. Left as a string rather than an enum so a status added later
+/// deserializes instead of failing the call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookingBookResponse {
+    pub status: String,
+    /// Present on `booked` — the instant the appointment actually
+    /// starts, which on an idempotent retry is the *existing* event's
+    /// start and not necessarily the one that was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Client {
+    /// `POST /api/voice/booking/slots` — when is this business free?
+    ///
+    /// Writes as well as reads: every time it returns is held for
+    /// `source_id` for a couple of minutes, so a second caller is not
+    /// offered it while this one is still deciding. Re-offering the same
+    /// call refreshes its own holds rather than colliding with them.
+    pub async fn booking_slots(
+        &self,
+        request: &BookingSlotsRequest,
+    ) -> Result<BookingSlotsResponse> {
+        self.post_json::<BookingSlotsResponse, _>("/api/voice/booking/slots", request)
+            .await
+    }
+
+    /// `POST /api/voice/booking/book` — put the caller in at this time.
+    pub async fn booking_book(&self, request: &BookingBookRequest) -> Result<BookingBookResponse> {
+        self.post_json::<BookingBookResponse, _>("/api/voice/booking/book", request)
+            .await
     }
 }
 
@@ -2188,10 +2385,96 @@ mod tests {
         let cursored = serde_json::to_string(&VoiceFlowsQuery {
             after: Some("flow_abc".into()),
             limit: Some(100),
+            schema_versions: None,
         })
         .unwrap();
         assert!(cursored.contains("\"after\":\"flow_abc\""), "{cursored}");
         assert!(cursored.contains("\"limit\":100"), "{cursored}");
+    }
+
+    #[test]
+    fn flows_query_sends_schema_versions_under_the_servers_name() {
+        // The struct is camelCase; this parameter is not. A silently
+        // camelCased key is ignored by the server, which reads exactly
+        // like an account with no flows in that version — so pin it.
+        let query = serde_json::to_string(&VoiceFlowsQuery {
+            schema_versions: Some("1,2".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(query, r#"{"schema_versions":"1,2"}"#);
+    }
+
+    // ---- Booking ----
+
+    #[test]
+    fn booking_slots_request_uses_the_routes_snake_case_wire() {
+        // Unlike the sync resources above, these routes speak snake_case.
+        // A camelCased body is rejected as a validation error mid-call,
+        // which the flow can only render as "unavailable".
+        let body = serde_json::to_string(&BookingSlotsRequest {
+            source_id: "call_1".into(),
+            duration_mins: 30,
+            buffer_mins: 10,
+            lead_mins: 120,
+            horizon_days: 14,
+            schedule: BookingSchedule {
+                tue: vec![BookingTimeRange {
+                    open: "09:00".into(),
+                    close: "17:00".into(),
+                }],
+                ..Default::default()
+            },
+            timezone: "Pacific/Auckland".into(),
+            exceptions: Vec::new(),
+            limit: 3,
+        })
+        .unwrap();
+        assert!(body.contains(r#""source_id":"call_1""#), "{body}");
+        assert!(body.contains(r#""duration_mins":30"#), "{body}");
+        assert!(body.contains(r#""timezone":"Pacific/Auckland""#), "{body}");
+        // Days with no hours, and an empty exception list, stay off the
+        // wire entirely rather than shipping empty arrays.
+        assert!(!body.contains("\"mon\""), "{body}");
+        assert!(!body.contains("exceptions"), "{body}");
+    }
+
+    #[test]
+    fn booking_slots_response_parses_both_answers() {
+        let offered: BookingSlotsResponse = serde_json::from_str(
+            r#"{"slots":[{"start":"2026-08-11T21:00:00Z","end":"2026-08-11T21:30:00Z"}],"timezone":"Pacific/Auckland"}"#,
+        )
+        .unwrap();
+        assert_eq!(offered.slots.len(), 1);
+        assert_eq!(offered.timezone, "Pacific/Auckland");
+        assert!(offered.status.is_none());
+
+        // The calendar could not be read. Not an error to the caller of
+        // this crate — the flow has an exit for it.
+        let down: BookingSlotsResponse =
+            serde_json::from_str(r#"{"status":"unavailable","reason":"not_connected"}"#).unwrap();
+        assert!(down.slots.is_empty());
+        assert_eq!(down.status.as_deref(), Some("unavailable"));
+        assert_eq!(down.reason.as_deref(), Some("not_connected"));
+    }
+
+    #[test]
+    fn booking_book_response_parses_every_outcome() {
+        let booked: BookingBookResponse =
+            serde_json::from_str(r#"{"status":"booked","start":"2026-08-11T21:00:00Z"}"#).unwrap();
+        assert_eq!(booked.status, "booked");
+        assert_eq!(booked.start.as_deref(), Some("2026-08-11T21:00:00Z"));
+
+        let taken: BookingBookResponse =
+            serde_json::from_str(r#"{"status":"slot_taken"}"#).unwrap();
+        assert_eq!(taken.status, "slot_taken");
+        assert!(taken.start.is_none());
+
+        // A status this build has never heard of still parses: failing
+        // here would drop a live call over an unknown string.
+        let future: BookingBookResponse =
+            serde_json::from_str(r#"{"status":"needs_deposit"}"#).unwrap();
+        assert_eq!(future.status, "needs_deposit");
     }
 
     #[test]
