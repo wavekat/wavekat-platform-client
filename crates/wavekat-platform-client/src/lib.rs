@@ -56,12 +56,14 @@ pub use sign::{
 pub use sync::{HasSyncEnvelope, Page, SyncEndpoint, SyncEnvelope, SyncRequest, SyncResponse};
 pub use token::Token;
 pub use voice::{
-    InstallHeartbeatRequest, InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest,
-    ShareRecordingResponse, ShareVisibility, SystemInfo, VoiceAccountRecord, VoiceAccounts,
-    VoiceAccountsQuery, VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition,
-    VoiceCallEndReason, VoiceCallFlowOutcome, VoiceCallFlowStep, VoiceCallRecord, VoiceCalls,
-    VoiceCallsQuery, VoiceFlowAssetsPage, VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage,
-    VoiceFlowsQuery, VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings,
-    VoiceRecordingsQuery, VoiceRecordingsSyncResponse, VoiceTranscriptChannel,
-    VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport,
+    BookingBookRequest, BookingBookResponse, BookingException, BookingSchedule, BookingSlot,
+    BookingSlotsRequest, BookingSlotsResponse, BookingTimeRange, InstallHeartbeatRequest,
+    InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest, ShareRecordingResponse,
+    ShareVisibility, SystemInfo, VoiceAccountRecord, VoiceAccounts, VoiceAccountsQuery,
+    VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason,
+    VoiceCallFlowOutcome, VoiceCallFlowStep, VoiceCallRecord, VoiceCalls, VoiceCallsQuery,
+    VoiceFlowAssetsPage, VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage, VoiceFlowsQuery,
+    VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery,
+    VoiceRecordingsSyncResponse, VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts,
+    VoiceTranscriptsQuery, VoiceTransport,
 };
