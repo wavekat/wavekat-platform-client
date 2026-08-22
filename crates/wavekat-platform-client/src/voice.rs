@@ -992,6 +992,20 @@ pub struct InstallHeartbeatRequest {
     pub arch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// How this copy was obtained — `"direct"` for a plain download,
+    /// `"mas"` for the sandboxed Mac App Store build. Unlike every other
+    /// field here it is **not** detectable: the two macOS builds share a
+    /// bundle id and a version, and the binary is identical, so only the
+    /// consumer knows which one it is shipping inside. Hence a caller
+    /// argument rather than part of [`SystemInfo`].
+    ///
+    /// Free text by contract, not an enum: the platform stores whatever
+    /// arrives so a new distribution can ship without a server release.
+    /// `None` when the consumer has nothing meaningful to say (a source
+    /// build, a package this crate has never heard of) — omitted from
+    /// the body entirely rather than sent as null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
 }
 
 /// The platform's view of an install row, echoed back from a heartbeat.
@@ -1005,6 +1019,11 @@ pub struct InstallHeartbeatResponse {
     pub os_version: Option<String>,
     pub arch: Option<String>,
     pub locale: Option<String>,
+    /// Echoed back. `#[serde(default)]` because a platform deployed
+    /// before this field existed omits the key rather than sending null,
+    /// and a heartbeat must not fail to parse against an older server.
+    #[serde(default)]
+    pub distribution: Option<String>,
     pub first_seen_at: String,
     pub last_seen_at: String,
 }
@@ -1026,10 +1045,16 @@ impl Client {
     /// verify.
     ///
     /// `base_url` is the platform base (e.g. `https://platform.wavekat.com`).
+    ///
+    /// `distribution` says how this copy was obtained (`"direct"`,
+    /// `"mas"`, …). It is the one field this call can't detect for
+    /// itself — see [`InstallHeartbeatRequest::distribution`] — so pass
+    /// `None` if the consumer has nothing meaningful to say.
     pub async fn install_heartbeat(
         base_url: &str,
         install_id: &str,
         app_version: &str,
+        distribution: Option<&str>,
         cred: &ReleaseCredential,
     ) -> Result<InstallHeartbeatResponse> {
         let sys = SystemInfo::detect();
@@ -1040,6 +1065,7 @@ impl Client {
             os_version: sys.os_version,
             arch: Some(sys.arch),
             locale: sys.locale,
+            distribution: distribution.map(str::to_string),
         };
         Client::post_public_signed_json::<InstallHeartbeatResponse, _>(
             base_url,
@@ -1968,6 +1994,7 @@ mod tests {
             os_version: Some("15.5.0".into()),
             arch: Some("aarch64".into()),
             locale: Some("en-NZ".into()),
+            distribution: Some("mas".into()),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"installId\":"), "{s}");
@@ -1976,6 +2003,7 @@ mod tests {
         assert!(s.contains("\"osVersion\":\"15.5.0\""), "{s}");
         assert!(s.contains("\"arch\":\"aarch64\""), "{s}");
         assert!(s.contains("\"locale\":\"en-NZ\""), "{s}");
+        assert!(s.contains("\"distribution\":\"mas\""), "{s}");
     }
 
     #[test]
@@ -1991,11 +2019,16 @@ mod tests {
             os_version: None,
             arch: None,
             locale: None,
+            distribution: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(!s.contains("osVersion"), "osVersion should be omitted: {s}");
         assert!(!s.contains("arch"), "arch should be omitted: {s}");
         assert!(!s.contains("locale"), "locale should be omitted: {s}");
+        assert!(
+            !s.contains("distribution"),
+            "distribution should be omitted: {s}"
+        );
     }
 
     #[test]
@@ -2016,6 +2049,49 @@ mod tests {
         assert_eq!(parsed.app_version, "0.0.21");
         assert_eq!(parsed.os_version.as_deref(), Some("15.5.0"));
         assert!(parsed.locale.is_none());
+        // The fixture above carries no `distribution` key at all, which
+        // is what a platform deployed before the field looks like. It
+        // must parse, not error — hence `#[serde(default)]`.
+        assert!(parsed.distribution.is_none());
+    }
+
+    #[test]
+    fn install_heartbeat_response_reads_the_distribution_back() {
+        let raw = r#"{
+            "id": "abc-123",
+            "installId": "11111111-1111-4111-8111-111111111111",
+            "appVersion": "0.0.48",
+            "os": "macos",
+            "osVersion": "15.5.0",
+            "arch": "aarch64",
+            "locale": "en-NZ",
+            "distribution": "mas",
+            "firstSeenAt": "2026-08-22T10:00:00.000Z",
+            "lastSeenAt": "2026-08-22T10:00:00.000Z"
+        }"#;
+        let parsed: InstallHeartbeatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.distribution.as_deref(), Some("mas"));
+    }
+
+    #[test]
+    fn install_heartbeat_response_accepts_an_unknown_distribution() {
+        // Free text by contract: the platform stores whatever arrives so
+        // a new distribution can ship without a server release. Parsing
+        // it into an enum here would undo that on the client side.
+        let raw = r#"{
+            "id": "abc-123",
+            "installId": "11111111-1111-4111-8111-111111111111",
+            "appVersion": "0.1.0",
+            "os": "windows",
+            "osVersion": null,
+            "arch": "x86_64",
+            "locale": null,
+            "distribution": "msstore",
+            "firstSeenAt": "2026-08-22T10:00:00.000Z",
+            "lastSeenAt": "2026-08-22T10:00:00.000Z"
+        }"#;
+        let parsed: InstallHeartbeatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.distribution.as_deref(), Some("msstore"));
     }
 
     #[test]
