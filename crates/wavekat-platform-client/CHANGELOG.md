@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.24...v0.0.25) - 2026-08-22
+
+### Added
+
+- [**breaking**] say which distribution an install came from ([#50](https://github.com/wavekat/wavekat-platform-client/pull/50))
+
 ## [0.0.24](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.23...v0.0.24) - 2026-08-08
 
 ### Added
