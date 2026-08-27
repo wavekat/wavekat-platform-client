@@ -256,6 +256,26 @@ impl Client {
         decode(url, resp).await
     }
 
+    /// `GET {base_url}{path}` returning raw bytes against a public,
+    /// unauthenticated platform endpoint. Like [`Client::get_public_json`],
+    /// builds a fresh `reqwest::Client` with no `Authorization` header —
+    /// the endpoint runs before any sign-in.
+    ///
+    /// Used by callers that need to read public binary content before
+    /// authentication — e.g. system flow audio clips. For authenticated
+    /// binary reads use [`Client::get_bytes`].
+    pub async fn get_public_bytes(base_url: &str, path: &str) -> Result<Vec<u8>> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        let resp = reqwest::Client::new().get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_error(status.as_u16(), url, body));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// Stream a `GET` response body into `sink`. Returns the number of
     /// bytes written. Used for big payloads (manifests, audio clips)
     /// where holding the whole body in memory would be wasteful.
