@@ -740,7 +740,12 @@ pub struct VoiceSystemFlowRecord {
     pub version: u32,
     /// The immutable published YAML document, verbatim.
     pub yaml: String,
-    /// RFC 3339 time this version was published (may be absent on older rows).
+    /// When this version was published, **verbatim from the platform's D1
+    /// column** — which defaults to SQLite `CURRENT_TIMESTAMP` and so is
+    /// `"YYYY-MM-DD HH:MM:SS"` in UTC, *not* RFC 3339 (space separator, no
+    /// offset). Some rows do carry RFC 3339. Consumers must accept **both**:
+    /// a strict RFC 3339 parse is how every pulled flow once rendered as
+    /// "Updated Jan 1, 1970" in the desktop client. Absent on older rows.
     #[serde(default)]
     pub published_at: Option<String>,
     /// Platform-resolved arming rung. One of `"open"`, `"account"`, `"pro"`,
@@ -840,7 +845,8 @@ impl Client {
         Self::get_public_json::<VoiceFlowAssetsPage>(base_url, &path, &[]).await
     }
 
-    /// `GET /api/voice/flows/system/assets/{ref}/bytes` — one clip from a
+    /// `GET /api/voice/flows/system/{id}/versions/{version}/assets/{ref}/bytes`
+    /// — one clip from a
     /// system flow's frozen asset set. Public by design — a signed-out
     /// device fetches clips for offline preview and caching. Returned in
     /// memory because a clip is tens of KB; same atomicity and offline-safe
