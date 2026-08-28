@@ -708,6 +708,64 @@ pub struct VoiceFlowAssetsPage {
     pub assets: Vec<VoiceFlowVersionAsset>,
 }
 
+// ---- System flows (public, unauthenticated) --------------------------------
+//
+// The platform's curated set of ready-made call flows, served to every
+// device — signed in or not — and cached locally for offline use. These
+// are distinct from a user's own authored flows (the published-flows
+// endpoint above) and are read-only to clients; the flows are authored
+// on the platform and have no upload direction. Keyed by language tier
+// and published schema version (spec §5, doc 48 amendment 2026-08-27).
+
+/// One system (ready-made) call-flow record as served by the unauthenticated
+/// `GET /api/voice/flows/system?language=…&schema_versions=…` endpoint.
+/// Public by design — a signed-out device lists the catalogue and may
+/// preview, cache, and arm from it (gated by entitlement at arming time).
+///
+/// `description`, `publishedAt`, and `systemTags` may be absent on older
+/// rows or when the platform withheld them; all are optional.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSystemFlowRecord {
+    /// Platform-assigned flow id (`flow_…`), stable across versions.
+    pub id: String,
+    pub name: String,
+    /// Optional short description of what the flow does.
+    #[serde(default)]
+    pub description: String,
+    /// BCP-47-ish language tag — the tier this flow was selected in by
+    /// the device's language preference.
+    pub language: String,
+    /// Published version number (1-based).
+    pub version: u32,
+    /// The immutable published YAML document, verbatim.
+    pub yaml: String,
+    /// When this version was published, **verbatim from the platform's D1
+    /// column** — which defaults to SQLite `CURRENT_TIMESTAMP` and so is
+    /// `"YYYY-MM-DD HH:MM:SS"` in UTC, *not* RFC 3339 (space separator, no
+    /// offset). Some rows do carry RFC 3339. Consumers must accept **both**:
+    /// a strict RFC 3339 parse is how every pulled flow once rendered as
+    /// "Updated Jan 1, 1970" in the desktop client. Absent on older rows.
+    #[serde(default)]
+    pub published_at: Option<String>,
+    /// Platform-resolved arming rung. One of `"open"`, `"account"`, `"pro"`,
+    /// or an unknown value (forward-compat for new platform rungs). Unknown
+    /// values are treated as the strictest known rung at arm time.
+    pub access: String,
+    /// Raw platform tags, preserved verbatim so a future feature can read
+    /// a new tag without a daemon release.
+    #[serde(default)]
+    pub system_tags: Vec<String>,
+}
+
+/// One page of system flows as served by
+/// `GET /api/voice/flows/system?language=…&schema_versions=…`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSystemFlowsPage {
+    pub flows: Vec<VoiceSystemFlowRecord>,
+}
+
 impl Client {
     /// `GET /api/voice/flows/published` — one page of the caller's
     /// published flow snapshots (latest version each). Strictly
@@ -745,6 +803,64 @@ impl Client {
         let path =
             format!("/api/voice/flows/{flow_id}/versions/{version}/assets/{asset_ref}/bytes");
         self.get_bytes(&path).await
+    }
+
+    /// `GET /api/voice/flows/system?language=…&schema_versions=…` — the
+    /// curated system (ready-made) flow catalogue, tier-cut by language and
+    /// filterable by supported schema versions. Public by design — a
+    /// signed-out device lists and caches the catalogue. No bearer auth
+    /// on purpose; the endpoint is available before any sign-in.
+    ///
+    /// `language` is optional (the platform lists all when absent); pass
+    /// `None` to omit it. `schema_versions` is a comma-separated ascending
+    /// list (`"1,2"`) and is always sent — the platform reads silence as
+    /// "v1 only", same warning as [`VoiceFlowsQuery::schema_versions`].
+    pub async fn system_flows(
+        base_url: &str,
+        language: Option<&str>,
+        schema_versions: &str,
+    ) -> Result<VoiceSystemFlowsPage> {
+        let language_owned;
+        let mut query: Vec<(&str, &str)> = vec![("schema_versions", schema_versions)];
+        if let Some(lang) = language {
+            language_owned = lang.to_string();
+            query.push(("language", &language_owned));
+        }
+        Self::get_public_json::<VoiceSystemFlowsPage>(base_url, "/api/voice/flows/system", &query)
+            .await
+    }
+
+    /// `GET /api/voice/flows/system/{id}/versions/{version}/assets` — the
+    /// frozen audio manifest for one system flow version. Public by design.
+    /// Returns an empty manifest if the version has no generated audio.
+    ///
+    /// Reuses [`VoiceFlowAssetsPage`], which is the same wire shape as the
+    /// gated manifest for owned flows.
+    pub async fn system_flow_version_assets(
+        base_url: &str,
+        flow_id: &str,
+        version: u32,
+    ) -> Result<VoiceFlowAssetsPage> {
+        let path = format!("/api/voice/flows/system/{flow_id}/versions/{version}/assets");
+        Self::get_public_json::<VoiceFlowAssetsPage>(base_url, &path, &[]).await
+    }
+
+    /// `GET /api/voice/flows/system/{id}/versions/{version}/assets/{ref}/bytes`
+    /// — one clip from a
+    /// system flow's frozen asset set. Public by design — a signed-out
+    /// device fetches clips for offline preview and caching. Returned in
+    /// memory because a clip is tens of KB; same atomicity and offline-safe
+    /// guarantees as the gated owned-flow asset fetch.
+    pub async fn system_flow_version_asset_bytes(
+        base_url: &str,
+        flow_id: &str,
+        version: u32,
+        asset_ref: &str,
+    ) -> Result<Vec<u8>> {
+        let path = format!(
+            "/api/voice/flows/system/{flow_id}/versions/{version}/assets/{asset_ref}/bytes"
+        );
+        Self::get_public_bytes(base_url, &path).await
     }
 }
 
@@ -2627,5 +2743,50 @@ mod tests {
         assert_eq!(parsed.envelope.schema_version, Some(2));
         let extras = parsed.envelope.extras.as_ref().expect("extras present");
         assert_eq!(extras["ringtone"], "classic");
+    }
+
+    #[test]
+    fn system_flow_record_parses_the_platform_shape() {
+        // The full wire shape as served by the platform's system flow
+        // endpoint: all fields present including optionals.
+        let json = r#"{
+            "id": "flow_voicemail",
+            "name": "Voicemail",
+            "description": "A short greeting.",
+            "language": "en",
+            "version": 2,
+            "yaml": "schema_version: 1\n",
+            "publishedAt": "2026-08-27 01:02:03",
+            "access": "open",
+            "systemTags": ["system", "access:open"]
+        }"#;
+        let rec: VoiceSystemFlowRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(rec.id, "flow_voicemail");
+        assert_eq!(rec.name, "Voicemail");
+        assert_eq!(rec.description, "A short greeting.");
+        assert_eq!(rec.language, "en");
+        assert_eq!(rec.version, 2);
+        assert_eq!(rec.yaml, "schema_version: 1\n");
+        assert_eq!(rec.published_at, Some("2026-08-27 01:02:03".into()));
+        assert_eq!(rec.access, "open");
+        assert_eq!(rec.system_tags, vec!["system", "access:open"]);
+    }
+
+    #[test]
+    fn system_flow_record_tolerates_missing_optionals_and_unknown_fields() {
+        // Older rows or newer platforms: description, publishedAt,
+        // systemTags may be absent; unknown fields must be ignored
+        // (forward compat).
+        let json = r#"{"id":"f","name":"n","language":"en","version":1,"yaml":"y","access":"account","someFutureField":1}"#;
+        let rec: VoiceSystemFlowRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(rec.id, "f");
+        assert_eq!(rec.name, "n");
+        assert_eq!(rec.description, "");
+        assert_eq!(rec.language, "en");
+        assert_eq!(rec.version, 1);
+        assert_eq!(rec.yaml, "y");
+        assert!(rec.published_at.is_none());
+        assert_eq!(rec.access, "account");
+        assert!(rec.system_tags.is_empty());
     }
 }

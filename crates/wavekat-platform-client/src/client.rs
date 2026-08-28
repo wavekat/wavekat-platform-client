@@ -256,6 +256,26 @@ impl Client {
         decode(url, resp).await
     }
 
+    /// `GET {base_url}{path}` returning raw bytes against a public,
+    /// unauthenticated platform endpoint. Like [`Client::get_public_json`],
+    /// builds a fresh `reqwest::Client` with no `Authorization` header —
+    /// the endpoint runs before any sign-in.
+    ///
+    /// Used by callers that need to read public binary content before
+    /// authentication — e.g. system flow audio clips. For authenticated
+    /// binary reads use [`Client::get_bytes`].
+    pub async fn get_public_bytes(base_url: &str, path: &str) -> Result<Vec<u8>> {
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{}{}", base, path);
+        let resp = reqwest::Client::new().get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_error(status.as_u16(), url, body));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// Stream a `GET` response body into `sink`. Returns the number of
     /// bytes written. Used for big payloads (manifests, audio clips)
     /// where holding the whole body in memory would be wasteful.
@@ -348,6 +368,72 @@ fn truncate(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-shot HTTP/1.1 server on an ephemeral port. Returns its base
+    /// URL; the thread answers exactly one request with `status` and
+    /// `body`, then exits. `std::net` rather than `tokio::net` because the
+    /// dev-dependency carries no `net` feature — the same reason
+    /// `oauth.rs` binds its redirect listener synchronously.
+    fn one_shot_server(status: &str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let status = status.to_string();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Drain just enough to let the client finish writing; we never
+            // parse the request — the test only cares about the response.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn get_public_bytes_returns_the_body_on_success() {
+        // The happy path the system-flow clip fetch rides: no bearer
+        // header is sent, and the raw bytes come back untouched.
+        let base = one_shot_server("200 OK", "RIFF....WAVE");
+        let bytes =
+            Client::get_public_bytes(&base, "/api/voice/flows/system/f/versions/1/assets/a/bytes")
+                .await
+                .expect("public bytes");
+        assert_eq!(bytes, b"RIFF....WAVE");
+    }
+
+    #[tokio::test]
+    async fn get_public_bytes_surfaces_a_non_2xx_as_http_error() {
+        // The failure path a signed-out device hits when a clip has been
+        // unpublished: an `Error::Http` carrying the status and the body,
+        // never an empty Ok. Callers skip that clip and leave the flow
+        // unarmable rather than caching silence.
+        let base = one_shot_server("404 Not Found", "{\"error\":\"not found\"}");
+        let err = Client::get_public_bytes(
+            &base,
+            "/api/voice/flows/system/nope/versions/1/assets/a/bytes",
+        )
+        .await
+        .expect_err("404 must not decode as success");
+        match err {
+            Error::Http {
+                status, ref body, ..
+            } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("not found"), "{body}");
+            }
+            other => panic!("expected Error::Http, got {other:?}"),
+        }
+    }
 
     #[test]
     fn http_error_format_matches_cli_shape() {
