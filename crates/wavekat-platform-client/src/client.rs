@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::error::{Error, Result};
+use crate::error::{classify_unauthorized, Error, Result};
 use crate::sign::{self, ReleaseCredential};
 use crate::token::Token;
 
@@ -338,12 +338,14 @@ async fn ensure_success(url: String, resp: reqwest::Response) -> Result<()> {
 
 /// Map an HTTP error response to the matching [`Error`] variant. 401
 /// gets its own [`Error::Unauthorized`] so consumers can render a
-/// tailored "sign in again" message; everything else stays as
+/// tailored "sign in again" message — or [`Error::ReauthRequired`] when
+/// the body says the credential is merely too old, which asks for a
+/// fresh sign-in rather than a dead session; everything else stays as
 /// [`Error::Http`].
 fn http_error(status: u16, url: String, body: String) -> Error {
     let body = truncate(&body, 500).to_string();
     if status == 401 {
-        Error::Unauthorized { url, body }
+        classify_unauthorized(url, body)
     } else {
         Error::Http { status, url, body }
     }
@@ -469,6 +471,22 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("401"), "{s}");
         assert!(s.contains("https://platform.wavekat.com/api/me"), "{s}");
+    }
+
+    #[test]
+    fn http_error_splits_a_stale_credential_out_of_unauthorized() {
+        // A 401 that names `reauth_required` is not a dead session: the
+        // remedy is signing in again and retrying the same call, so it
+        // must not collapse into Unauthorized on the way through.
+        let e = http_error(
+            401,
+            "https://platform.wavekat.com/api/me".into(),
+            "{\"error\":\"reauth_required\"}".into(),
+        );
+        assert!(
+            matches!(e, Error::ReauthRequired { .. }),
+            "expected ReauthRequired, got {e:?}"
+        );
     }
 
     #[test]
