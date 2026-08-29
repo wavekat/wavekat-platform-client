@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.27](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.26...v0.0.27) - 2026-08-29
+
+### Added
+
+- add account deletion to the client ([#53](https://github.com/wavekat/wavekat-platform-client/pull/53))
+
 ## [0.0.25](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.24...v0.0.25) - 2026-08-22
 
 ### Added
