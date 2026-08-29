@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.28](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.27...v0.0.28) - 2026-08-29
+
+### Added
+
+- count saved lines and label sets in a deletion preview ([#55](https://github.com/wavekat/wavekat-platform-client/pull/55))
+
 ## [0.0.27](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.26...v0.0.27) - 2026-08-29
 
 ### Added
