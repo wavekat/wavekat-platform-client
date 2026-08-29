@@ -5,7 +5,7 @@
 //! its Platform settings page. Keeping the struct here (and re-exported
 //! from the crate root) means consumers don't redefine it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::error::Result;
@@ -32,7 +32,12 @@ pub struct Me {
 /// action without seeing what is in it. Counts are of the account's
 /// *own* content — anything it authored inside someone else's project
 /// is not counted, because the platform's purge will not take it.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` as well as `Deserialize` because a consumer is rarely
+/// the thing that displays these: the desktop daemon fetches them and
+/// forwards them to its own renderer, and without a way to write them
+/// back out every consumer would redefine the struct to do it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletionPreview {
     pub calls: u32,
     pub recordings: u32,
@@ -113,6 +118,23 @@ mod tests {
         assert_eq!(p.recordings, 1);
         assert_eq!(p.annotations, 90);
         assert_eq!(p.models, 1);
+    }
+
+    #[test]
+    fn deletion_preview_round_trips_for_a_consumer_to_forward() {
+        // The daemon deserializes the platform's answer and serializes
+        // it again for its renderer; losing a count in the middle would
+        // understate what a delete takes.
+        let p: DeletionPreview = serde_json::from_str(
+            r#"{"calls":6,"recordings":1,"transcripts":4,"shares":0,
+                "flows":3,"contacts":9,"prompts":2,"projects":1,"files":5,
+                "annotations":90,"exports":1,"models":1}"#,
+        )
+        .unwrap();
+        let back: DeletionPreview =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.calls, 6);
+        assert_eq!(back.annotations, 90);
     }
 
     #[test]
