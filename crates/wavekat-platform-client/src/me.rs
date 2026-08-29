@@ -38,7 +38,12 @@ pub struct Me {
 /// forwards them to its own renderer, and without a way to write them
 /// back out every consumer would redefine the struct to do it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeletionPreview {
+    /// Phone lines whose settings were backed up to the account. Named
+    /// `accounts` on the wire because the platform calls them voice
+    /// accounts; to the person confirming, they are their saved lines.
+    pub accounts: u32,
     pub calls: u32,
     pub recordings: u32,
     pub transcripts: u32,
@@ -50,6 +55,10 @@ pub struct DeletionPreview {
     pub contacts: u32,
     pub prompts: u32,
     pub projects: u32,
+    /// Label sets that nothing else still references. One another
+    /// project's labelling still uses survives, so this is not simply
+    /// "sets this account created".
+    pub label_sets: u32,
     pub files: u32,
     pub annotations: u32,
     pub exports: u32,
@@ -114,7 +123,9 @@ mod tests {
             "exports": 1, "models": 1
         }"#;
         let p: DeletionPreview = serde_json::from_str(json).unwrap();
+        assert_eq!(p.accounts, 2);
         assert_eq!(p.calls, 6);
+        assert_eq!(p.label_sets, 0);
         assert_eq!(p.recordings, 1);
         assert_eq!(p.annotations, 90);
         assert_eq!(p.models, 1);
@@ -126,9 +137,9 @@ mod tests {
         // it again for its renderer; losing a count in the middle would
         // understate what a delete takes.
         let p: DeletionPreview = serde_json::from_str(
-            r#"{"calls":6,"recordings":1,"transcripts":4,"shares":0,
-                "flows":3,"contacts":9,"prompts":2,"projects":1,"files":5,
-                "annotations":90,"exports":1,"models":1}"#,
+            r#"{"accounts":2,"calls":6,"recordings":1,"transcripts":4,"shares":0,
+                "flows":3,"contacts":9,"prompts":2,"projects":1,"labelSets":0,
+                "files":5,"annotations":90,"exports":1,"models":1}"#,
         )
         .unwrap();
         let back: DeletionPreview =
