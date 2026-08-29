@@ -47,7 +47,7 @@ mod voice;
 
 pub use client::Client;
 pub use error::{Error, Result};
-pub use me::Me;
+pub use me::{DeletionPreview, Me};
 pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
 pub use sign::{
     cert_payload, generate_keypair, generate_master, issue_release_credential, verify_cert,
