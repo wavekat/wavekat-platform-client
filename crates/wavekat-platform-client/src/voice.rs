@@ -724,6 +724,28 @@ pub struct VoiceFlowAssetsPage {
 ///
 /// `description`, `publishedAt`, and `systemTags` may be absent on older
 /// rows or when the platform withheld them; all are optional.
+///
+/// A consumer has to be able to *name* this type — to map a record into its
+/// own cache row, or to build one in a fixture — not merely receive it by
+/// inference from [`Client::system_flows`]. This example is that guarantee:
+/// a doctest compiles as a downstream crate, so it fails if the type ever
+/// stops being re-exported from the crate root. The unit tests below cannot
+/// catch that, because inside the crate the private `voice` module is always
+/// in scope — which is exactly how 0.0.26 through 0.0.28 shipped these two
+/// types unreachable.
+///
+/// ```
+/// use wavekat_platform_client::{VoiceSystemFlowRecord, VoiceSystemFlowsPage};
+///
+/// let page: VoiceSystemFlowsPage = serde_json::from_str(
+///     r#"{"flows":[{"id":"flow_voicemail","name":"Voicemail","description":"",
+///          "language":"en","version":2,"yaml":"schema_version: 1\n",
+///          "publishedAt":null,"access":"open","systemTags":["system"]}]}"#,
+/// )
+/// .unwrap();
+/// let first: &VoiceSystemFlowRecord = &page.flows[0];
+/// assert_eq!(first.access, "open");
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceSystemFlowRecord {
