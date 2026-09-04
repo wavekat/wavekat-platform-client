@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.28...v0.0.29) - 2026-09-04
+
+### Fixed
+
+- export the system-flow wire types ([#57](https://github.com/wavekat/wavekat-platform-client/pull/57))
+
 ## [0.0.28](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.27...v0.0.28) - 2026-08-29
 
 ### Added
