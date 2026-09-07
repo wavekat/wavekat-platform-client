@@ -1115,7 +1115,7 @@ impl SystemInfo {
 /// Body of `POST /api/voice/installs/heartbeat`. The daemon supplies
 /// `install_id` + `app_version`; [`Client::install_heartbeat`] fills the
 /// environment fields from [`SystemInfo::detect`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallHeartbeatRequest {
     /// The daemon's persisted install UUID — the platform's upsert key.
@@ -1144,6 +1144,77 @@ pub struct InstallHeartbeatRequest {
     /// the body entirely rather than sent as null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<String>,
+    /// Fleet-admin fields (build provenance, update-channel and
+    /// updater state, native arch, process start time). Flattened onto
+    /// the wire so the body stays flat JSON even though the daemon
+    /// builds one value; see [`InstallHeartbeatFleet`].
+    #[serde(flatten, default)]
+    pub fleet: InstallHeartbeatFleet,
+}
+
+/// Optional fleet-admin fields on the install heartbeat, grouped so the
+/// daemon can build (and the platform's fleet-admin view can read) one
+/// value rather than ten loose arguments. Flattened onto
+/// [`InstallHeartbeatRequest`] via `#[serde(flatten)]`, so on the wire
+/// these fields sit alongside `installId` / `appVersion` / … with no
+/// nesting.
+///
+/// Every field is optional and additive: an older daemon that never
+/// sets them sends a body identical to the one before this struct
+/// existed (an all-`None` `InstallHeartbeatFleet` serializes to no
+/// extra keys), and a platform that hasn't deployed the corresponding
+/// migration yet simply stores nulls. Read by `wavekat-platform`'s
+/// fleet-admin view (docs/45) — keep every field optional so this
+/// remains safe to send against an older platform and safe to omit
+/// from an older daemon.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallHeartbeatFleet {
+    /// The git SHA the daemon binary was built from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_sha: Option<String>,
+    /// How this copy was obtained, at a finer grain than
+    /// [`InstallHeartbeatRequest::distribution`] — e.g. `"mas"`,
+    /// `"msstore"`, `"snap"`, `"appimage"`, `"deb"`, `"direct"`,
+    /// `"dev"`. Free text by contract, not an enum: the platform
+    /// stores whatever arrives so a new install source can ship
+    /// without a server release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_source: Option<String>,
+    /// Which release channel this build tracks — `"stable"` or
+    /// `"beta"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<String>,
+    /// Whether the daemon's self-updater is active. `false` where the
+    /// updater is inert because the platform's own store owns updates
+    /// instead (Mac App Store, Microsoft Store) or the build is
+    /// unpackaged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_enabled: Option<bool>,
+    /// The self-updater's current state machine status — `"idle"`,
+    /// `"checking"`, `"available"`, `"downloading"`, `"downloaded"`,
+    /// `"not-available"`, or `"error"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_status: Option<String>,
+    /// The version the updater has staged or is offering, when there
+    /// is one pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_version: Option<String>,
+    /// ISO-8601 timestamp of the updater's last check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_checked_at: Option<String>,
+    /// The updater's last error message, if any. At most 256
+    /// characters — the caller truncates before sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater_error: Option<String>,
+    /// `os.machine()` — the host's native architecture. Differs from
+    /// `arch` when the process is running under translation (e.g.
+    /// Rosetta on Apple Silicon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_arch: Option<String>,
+    /// ISO-8601 timestamp of when the daemon process started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
 }
 
 /// The platform's view of an install row, echoed back from a heartbeat.
@@ -1188,12 +1259,43 @@ impl Client {
     /// `"mas"`, …). It is the one field this call can't detect for
     /// itself — see [`InstallHeartbeatRequest::distribution`] — so pass
     /// `None` if the consumer has nothing meaningful to say.
+    ///
+    /// Sends no fleet-admin fields (see [`InstallHeartbeatFleet`]) — a
+    /// thin wrapper over [`Client::install_heartbeat_with`] for
+    /// callers that don't have them. Consumers that do should call
+    /// [`Client::install_heartbeat_with`] directly instead.
     pub async fn install_heartbeat(
         base_url: &str,
         install_id: &str,
         app_version: &str,
         distribution: Option<&str>,
         cred: &ReleaseCredential,
+    ) -> Result<InstallHeartbeatResponse> {
+        Client::install_heartbeat_with(
+            base_url,
+            install_id,
+            app_version,
+            distribution,
+            cred,
+            InstallHeartbeatFleet::default(),
+        )
+        .await
+    }
+
+    /// As [`Client::install_heartbeat`], but also takes the
+    /// fleet-admin fields (build provenance, update-channel and
+    /// updater state, native arch, process start time) that a
+    /// fleet-aware daemon can supply — see [`InstallHeartbeatFleet`].
+    /// Pass `InstallHeartbeatFleet::default()` for a caller with
+    /// nothing to report; [`Client::install_heartbeat`] does exactly
+    /// that.
+    pub async fn install_heartbeat_with(
+        base_url: &str,
+        install_id: &str,
+        app_version: &str,
+        distribution: Option<&str>,
+        cred: &ReleaseCredential,
+        fleet: InstallHeartbeatFleet,
     ) -> Result<InstallHeartbeatResponse> {
         let sys = SystemInfo::detect();
         let body = InstallHeartbeatRequest {
@@ -1204,6 +1306,7 @@ impl Client {
             arch: Some(sys.arch),
             locale: sys.locale,
             distribution: distribution.map(str::to_string),
+            fleet,
         };
         Client::post_public_signed_json::<InstallHeartbeatResponse, _>(
             base_url,
@@ -2133,6 +2236,7 @@ mod tests {
             arch: Some("aarch64".into()),
             locale: Some("en-NZ".into()),
             distribution: Some("mas".into()),
+            fleet: InstallHeartbeatFleet::default(),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"installId\":"), "{s}");
@@ -2158,6 +2262,7 @@ mod tests {
             arch: None,
             locale: None,
             distribution: None,
+            fleet: InstallHeartbeatFleet::default(),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(!s.contains("osVersion"), "osVersion should be omitted: {s}");
@@ -2167,6 +2272,127 @@ mod tests {
             !s.contains("distribution"),
             "distribution should be omitted: {s}"
         );
+    }
+
+    #[test]
+    fn install_heartbeat_request_with_default_fleet_matches_pre_fleet_key_set() {
+        // `fleet: InstallHeartbeatFleet::default()` (all `None`) must
+        // serialize to exactly the key set the platform saw before this
+        // struct existed — flatten + `skip_serializing_if` must not
+        // leak an empty-object marker or any of the ten new keys.
+        let req = InstallHeartbeatRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.21".into(),
+            os: "macos".into(),
+            os_version: Some("15.5.0".into()),
+            arch: Some("aarch64".into()),
+            locale: Some("en-NZ".into()),
+            distribution: Some("mas".into()),
+            fleet: InstallHeartbeatFleet::default(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "installId",
+            "appVersion",
+            "os",
+            "osVersion",
+            "arch",
+            "locale",
+            "distribution",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "unexpected key set: {value}");
+    }
+
+    #[test]
+    fn install_heartbeat_request_with_full_fleet_serializes_camel_case() {
+        let req = InstallHeartbeatRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.21".into(),
+            os: "macos".into(),
+            os_version: Some("15.5.0".into()),
+            arch: Some("aarch64".into()),
+            locale: Some("en-NZ".into()),
+            distribution: Some("mas".into()),
+            fleet: InstallHeartbeatFleet {
+                build_sha: Some("deadbeef".into()),
+                install_source: Some("mas".into()),
+                update_channel: Some("stable".into()),
+                updater_enabled: Some(false),
+                updater_status: Some("idle".into()),
+                updater_version: Some("0.0.22".into()),
+                updater_checked_at: Some("2026-09-07T10:00:00.000Z".into()),
+                updater_error: Some("network timeout".into()),
+                native_arch: Some("arm64".into()),
+                started_at: Some("2026-09-07T09:00:00.000Z".into()),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["buildSha"], "deadbeef");
+        assert_eq!(value["installSource"], "mas");
+        assert_eq!(value["updateChannel"], "stable");
+        assert_eq!(value["updaterEnabled"], serde_json::json!(false));
+        assert!(value["updaterEnabled"].is_boolean(), "{value}");
+        assert_eq!(value["updaterStatus"], "idle");
+        assert_eq!(value["updaterVersion"], "0.0.22");
+        assert_eq!(value["updaterCheckedAt"], "2026-09-07T10:00:00.000Z");
+        assert_eq!(value["updaterError"], "network timeout");
+        assert_eq!(value["nativeArch"], "arm64");
+        assert_eq!(value["startedAt"], "2026-09-07T09:00:00.000Z");
+    }
+
+    #[test]
+    fn install_heartbeat_request_full_fleet_round_trips() {
+        let req = InstallHeartbeatRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.21".into(),
+            os: "macos".into(),
+            os_version: Some("15.5.0".into()),
+            arch: Some("aarch64".into()),
+            locale: Some("en-NZ".into()),
+            distribution: Some("mas".into()),
+            fleet: InstallHeartbeatFleet {
+                build_sha: Some("deadbeef".into()),
+                install_source: Some("mas".into()),
+                update_channel: Some("stable".into()),
+                updater_enabled: Some(false),
+                updater_status: Some("idle".into()),
+                updater_version: Some("0.0.22".into()),
+                updater_checked_at: Some("2026-09-07T10:00:00.000Z".into()),
+                updater_error: Some("network timeout".into()),
+                native_arch: Some("arm64".into()),
+                started_at: Some("2026-09-07T09:00:00.000Z".into()),
+            },
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let round_tripped: InstallHeartbeatRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(round_tripped, req);
+    }
+
+    #[test]
+    fn install_heartbeat_request_without_fleet_keys_deserializes_to_default_fleet() {
+        // A body from a daemon that predates the fleet fields (or one
+        // that simply has nothing to report) carries none of the ten
+        // new keys. It must still parse, with `fleet` coming back as
+        // the all-`None` default.
+        let raw = r#"{
+            "installId": "11111111-1111-4111-8111-111111111111",
+            "appVersion": "0.0.21",
+            "os": "macos",
+            "osVersion": "15.5.0",
+            "arch": "aarch64",
+            "locale": "en-NZ",
+            "distribution": "mas"
+        }"#;
+        let parsed: InstallHeartbeatRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.fleet, InstallHeartbeatFleet::default());
     }
 
     #[test]
