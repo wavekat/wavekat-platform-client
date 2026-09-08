@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.31](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.30...v0.0.31) - 2026-09-08
+
+### Added
+
+- anonymous usage events for the install ping ([#61](https://github.com/wavekat/wavekat-platform-client/pull/61))
+
 ## [0.0.30](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.29...v0.0.30) - 2026-09-07
 
 ### Added
