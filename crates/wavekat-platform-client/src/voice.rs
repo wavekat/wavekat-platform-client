@@ -1215,6 +1215,32 @@ pub struct InstallHeartbeatFleet {
     /// ISO-8601 timestamp of when the daemon process started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// Whether at least one SIP account is saved on this install.
+    ///
+    /// First of five activation-funnel facts (`has_account`,
+    /// `has_registered`, `has_called`, `flow_armed`, `flow_answered`)
+    /// that let the fleet page tell how far an install got. Booleans by
+    /// design, not counts or timestamps: the anonymous ping carries no
+    /// identity, and a yes/no is all a fleet-wide funnel needs. Absent
+    /// means "not reported by this build", never "no" — the platform
+    /// stores NULL and reads it as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_account: Option<bool>,
+    /// Whether any SIP account has ever registered successfully on
+    /// this install (persisted, so it stays `true` across restarts and
+    /// while the provider is currently unreachable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_registered: Option<bool>,
+    /// Whether any call has ever been placed or answered on this
+    /// install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_called: Option<bool>,
+    /// Whether a call flow is armed on at least one line right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_armed: Option<bool>,
+    /// Whether a call flow has ever answered a call on this install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_answered: Option<bool>,
 }
 
 /// The platform's view of an install row, echoed back from a heartbeat.
@@ -2332,6 +2358,11 @@ mod tests {
                 updater_error: Some("network timeout".into()),
                 native_arch: Some("arm64".into()),
                 started_at: Some("2026-09-07T09:00:00.000Z".into()),
+                has_account: Some(true),
+                has_registered: Some(true),
+                has_called: Some(false),
+                flow_armed: Some(true),
+                flow_answered: Some(false),
             },
         };
         let value: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -2346,6 +2377,12 @@ mod tests {
         assert_eq!(value["updaterError"], "network timeout");
         assert_eq!(value["nativeArch"], "arm64");
         assert_eq!(value["startedAt"], "2026-09-07T09:00:00.000Z");
+        assert_eq!(value["hasAccount"], serde_json::json!(true));
+        assert_eq!(value["hasRegistered"], serde_json::json!(true));
+        assert_eq!(value["hasCalled"], serde_json::json!(false));
+        assert!(value["hasCalled"].is_boolean(), "{value}");
+        assert_eq!(value["flowArmed"], serde_json::json!(true));
+        assert_eq!(value["flowAnswered"], serde_json::json!(false));
     }
 
     #[test]
@@ -2369,6 +2406,11 @@ mod tests {
                 updater_error: Some("network timeout".into()),
                 native_arch: Some("arm64".into()),
                 started_at: Some("2026-09-07T09:00:00.000Z".into()),
+                has_account: Some(true),
+                has_registered: Some(true),
+                has_called: Some(false),
+                flow_armed: Some(true),
+                flow_answered: Some(false),
             },
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -2379,8 +2421,8 @@ mod tests {
     #[test]
     fn install_heartbeat_request_without_fleet_keys_deserializes_to_default_fleet() {
         // A body from a daemon that predates the fleet fields (or one
-        // that simply has nothing to report) carries none of the ten
-        // new keys. It must still parse, with `fleet` coming back as
+        // that simply has nothing to report) carries none of the fifteen
+        // fleet keys. It must still parse, with `fleet` coming back as
         // the all-`None` default.
         let raw = r#"{
             "installId": "11111111-1111-4111-8111-111111111111",
