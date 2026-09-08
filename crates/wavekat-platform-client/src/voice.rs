@@ -1215,32 +1215,17 @@ pub struct InstallHeartbeatFleet {
     /// ISO-8601 timestamp of when the daemon process started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
-    /// Whether at least one SIP account is saved on this install.
-    ///
-    /// First of five activation-funnel facts (`has_account`,
-    /// `has_registered`, `has_called`, `flow_armed`, `flow_answered`)
-    /// that let the fleet page tell how far an install got. Booleans by
-    /// design, not counts or timestamps: the anonymous ping carries no
-    /// identity, and a yes/no is all a fleet-wide funnel needs. Absent
-    /// means "not reported by this build", never "no" — the platform
-    /// stores NULL and reads it as unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_account: Option<bool>,
-    /// Whether any SIP account has ever registered successfully on
-    /// this install (persisted, so it stays `true` across restarts and
-    /// while the provider is currently unreachable).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_registered: Option<bool>,
-    /// Whether any call has ever been placed or answered on this
-    /// install.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_called: Option<bool>,
     /// Whether a call flow is armed on at least one line right now.
+    ///
+    /// The one activation fact that is *state* rather than a milestone,
+    /// so it rides the periodic snapshot; "did this install ever add an
+    /// account / register / connect a call" are milestones and go
+    /// through [`Client::install_usage_events_with`] instead. A yes/no
+    /// by design — the anonymous ping carries no identity. Absent means
+    /// "not reported by this build", never "no": the platform stores
+    /// NULL and reads it as unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_armed: Option<bool>,
-    /// Whether a call flow has ever answered a call on this install.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_answered: Option<bool>,
 }
 
 /// The platform's view of an install row, echoed back from a heartbeat.
@@ -1342,6 +1327,94 @@ impl Client {
         )
         .await
     }
+
+    /// `POST /api/voice/installs/events` — the anonymous usage-event
+    /// batch that accompanies the install heartbeat. Same trust model
+    /// as [`Client::install_heartbeat_with`]: no session, signed with
+    /// the release credential, keyed by the persisted `install_id`,
+    /// carrying no identity.
+    ///
+    /// Where the heartbeat is a *snapshot* (what the install looks like
+    /// now), this is a *log* of milestones and actions (an account was
+    /// added, a call connected, a flow answered) — the shape a setup
+    /// funnel and a time-to-activate read need. Send at most
+    /// [`USAGE_EVENTS_MAX_BATCH`] events per call; the platform rejects
+    /// larger bodies. Retries are safe: each event carries a
+    /// client-generated id the platform de-duplicates on, so a batch
+    /// whose response was lost can be sent again verbatim.
+    pub async fn install_usage_events_with(
+        base_url: &str,
+        install_id: &str,
+        app_version: &str,
+        cred: &ReleaseCredential,
+        events: Vec<UsageEvent>,
+    ) -> Result<UsageEventsResponse> {
+        let body = UsageEventsRequest {
+            install_id: install_id.to_string(),
+            app_version: app_version.to_string(),
+            events,
+        };
+        Client::post_public_signed_json::<UsageEventsResponse, _>(
+            base_url,
+            "/api/voice/installs/events",
+            &body,
+            cred,
+        )
+        .await
+    }
+}
+
+/// Upper bound on `events.len()` in one
+/// [`Client::install_usage_events_with`] call. Mirrors the platform's
+/// request validation; a caller with more pending events pages through
+/// them.
+pub const USAGE_EVENTS_MAX_BATCH: usize = 100;
+
+/// One anonymous usage event — a milestone or an action on an install,
+/// stamped when it happened. See [`Client::install_usage_events_with`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageEvent {
+    /// Client-generated UUID; the platform's de-duplication key, so a
+    /// retried batch never double-counts.
+    pub id: String,
+    /// Event name — `snake_case`, `^[a-z][a-z0-9_]{1,63}$`. Free text by
+    /// contract, not an enum: the platform stores whatever arrives so a
+    /// new event can ship in the daemon without a server release. The
+    /// daemon owns the catalogue (and its privacy page lists it).
+    pub name: String,
+    /// Optional qualifier from the same small vocabulary — e.g.
+    /// `"inbound"` / `"outbound"` on a connected-call event. Same
+    /// pattern and length rule as `name`. Never free text, never a
+    /// number, never anything the user typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// ISO-8601 timestamp of when the event happened on the client —
+    /// not when it was sent, since batches are flushed later.
+    pub occurred_at: String,
+}
+
+/// Body of `POST /api/voice/installs/events`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageEventsRequest {
+    /// The daemon's persisted install UUID — the same one the heartbeat
+    /// upserts on, so events join to `voice_installs`.
+    pub install_id: String,
+    /// WaveKat Voice's own version at send time.
+    pub app_version: String,
+    /// At most [`USAGE_EVENTS_MAX_BATCH`] entries.
+    pub events: Vec<UsageEvent>,
+}
+
+/// Response to `POST /api/voice/installs/events`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageEventsResponse {
+    /// How many of the submitted events were stored for the first time.
+    /// Less than the batch size when some ids were already known (a
+    /// retry) — that is success, not an error.
+    pub accepted: u32,
 }
 
 // ---- Client surface for recordings ----------------------------------------
@@ -2358,11 +2431,7 @@ mod tests {
                 updater_error: Some("network timeout".into()),
                 native_arch: Some("arm64".into()),
                 started_at: Some("2026-09-07T09:00:00.000Z".into()),
-                has_account: Some(true),
-                has_registered: Some(true),
-                has_called: Some(false),
                 flow_armed: Some(true),
-                flow_answered: Some(false),
             },
         };
         let value: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -2377,12 +2446,8 @@ mod tests {
         assert_eq!(value["updaterError"], "network timeout");
         assert_eq!(value["nativeArch"], "arm64");
         assert_eq!(value["startedAt"], "2026-09-07T09:00:00.000Z");
-        assert_eq!(value["hasAccount"], serde_json::json!(true));
-        assert_eq!(value["hasRegistered"], serde_json::json!(true));
-        assert_eq!(value["hasCalled"], serde_json::json!(false));
-        assert!(value["hasCalled"].is_boolean(), "{value}");
         assert_eq!(value["flowArmed"], serde_json::json!(true));
-        assert_eq!(value["flowAnswered"], serde_json::json!(false));
+        assert!(value["flowArmed"].is_boolean(), "{value}");
     }
 
     #[test]
@@ -2406,11 +2471,7 @@ mod tests {
                 updater_error: Some("network timeout".into()),
                 native_arch: Some("arm64".into()),
                 started_at: Some("2026-09-07T09:00:00.000Z".into()),
-                has_account: Some(true),
-                has_registered: Some(true),
-                has_called: Some(false),
                 flow_armed: Some(true),
-                flow_answered: Some(false),
             },
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -2421,7 +2482,7 @@ mod tests {
     #[test]
     fn install_heartbeat_request_without_fleet_keys_deserializes_to_default_fleet() {
         // A body from a daemon that predates the fleet fields (or one
-        // that simply has nothing to report) carries none of the fifteen
+        // that simply has nothing to report) carries none of the eleven
         // fleet keys. It must still parse, with `fleet` coming back as
         // the all-`None` default.
         let raw = r#"{
@@ -2435,6 +2496,63 @@ mod tests {
         }"#;
         let parsed: InstallHeartbeatRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.fleet, InstallHeartbeatFleet::default());
+    }
+
+    #[test]
+    fn usage_events_request_serializes_camel_case_and_omits_absent_detail() {
+        let req = UsageEventsRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.53".into(),
+            events: vec![
+                UsageEvent {
+                    id: "22222222-2222-4222-8222-222222222222".into(),
+                    name: "account_added".into(),
+                    detail: None,
+                    occurred_at: "2026-09-08T09:00:00.000Z".into(),
+                },
+                UsageEvent {
+                    id: "33333333-3333-4333-8333-333333333333".into(),
+                    name: "call_connected".into(),
+                    detail: Some("inbound".into()),
+                    occurred_at: "2026-09-08T09:05:00.000Z".into(),
+                },
+            ],
+        };
+        let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["installId"], "11111111-1111-4111-8111-111111111111");
+        assert_eq!(value["appVersion"], "0.0.53");
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["name"], "account_added");
+        assert_eq!(events[0]["occurredAt"], "2026-09-08T09:00:00.000Z");
+        assert!(
+            events[0].get("detail").is_none(),
+            "absent detail must be omitted, not null: {value}"
+        );
+        assert_eq!(events[1]["detail"], "inbound");
+    }
+
+    #[test]
+    fn usage_events_request_round_trips() {
+        let req = UsageEventsRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.53".into(),
+            events: vec![UsageEvent {
+                id: "22222222-2222-4222-8222-222222222222".into(),
+                name: "flow_answered".into(),
+                detail: Some("message_left".into()),
+                occurred_at: "2026-09-08T09:00:00.000Z".into(),
+            }],
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: UsageEventsRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn usage_events_response_parses_platform_shape() {
+        let parsed: UsageEventsResponse = serde_json::from_str(r#"{"accepted":2}"#).unwrap();
+        assert_eq!(parsed.accepted, 2);
     }
 
     #[test]
