@@ -1099,9 +1099,14 @@ impl SystemInfo {
     /// Probe the current host. Cheap enough to call per heartbeat; we
     /// don't cache so a locale change between launches is reflected.
     pub fn detect() -> Self {
-        let os_version = match os_info::get().version() {
-            os_info::Version::Unknown => None,
-            v => Some(v.to_string()),
+        let os_version = match LinuxSandbox::detect() {
+            // Inside a sandbox `os_info` reads the sandbox's own release
+            // file, not the host's — see [`host_os_version`].
+            Some(sandbox) => host_os_version(sandbox, |path| std::fs::read_to_string(path).ok()),
+            None => match os_info::get().version() {
+                os_info::Version::Unknown => None,
+                v => Some(v.to_string()),
+            },
         };
         SystemInfo {
             os: std::env::consts::OS.to_string(),
@@ -1110,6 +1115,74 @@ impl SystemInfo {
             locale: sys_locale::get_locale(),
         }
     }
+}
+
+/// A Linux app sandbox that hides the host's `/etc/os-release`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum LinuxSandbox {
+    Snap,
+    Flatpak,
+}
+
+impl LinuxSandbox {
+    #[cfg(target_os = "linux")]
+    fn detect() -> Option<Self> {
+        if std::path::Path::new("/.flatpak-info").exists() {
+            Some(LinuxSandbox::Flatpak)
+        } else if std::env::var_os("SNAP").is_some() {
+            Some(LinuxSandbox::Snap)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect() -> Option<Self> {
+        None
+    }
+}
+
+/// The *host's* OS version as seen from inside `sandbox`.
+///
+/// `os_info` resolves `/etc/os-release`, which a sandbox rewrites:
+///
+/// - **Flatpak** mounts its runtime there (`ID=org.freedesktop.platform`);
+///   the host's copy is exposed at `/run/host/os-release`.
+/// - **Snap** shares the host's `/etc`, but `/etc/os-release` is a
+///   symlink into `/usr`, which comes from the base snap — so it reads
+///   `ID=ubuntu-core`. The host copy under `/var/lib/snapd/hostfs` needs
+///   the `system-observe` interface, which snapd never auto-connects.
+///   `/etc/lsb-release` is a real file on Ubuntu hosts and readable under
+///   the default confinement, so it's the one host source we can reach.
+///
+/// Returns `None` rather than falling back to `os_info`: inside a sandbox
+/// that would report the runtime's version as if it were the host's.
+fn host_os_version(sandbox: LinuxSandbox, read: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let sources: &[(&str, &str)] = match sandbox {
+        LinuxSandbox::Flatpak => &[
+            ("/run/host/os-release", "VERSION_ID"),
+            ("/run/host/usr/lib/os-release", "VERSION_ID"),
+            ("/run/host/etc/os-release", "VERSION_ID"),
+        ],
+        LinuxSandbox::Snap => &[("/etc/lsb-release", "DISTRIB_RELEASE")],
+    };
+    sources
+        .iter()
+        .find_map(|(path, key)| read(path).and_then(|contents| release_value(&contents, key)))
+}
+
+/// The value of `key` in an os-release / lsb-release style `KEY=value`
+/// file, with surrounding quotes stripped. `None` when absent or blank.
+fn release_value(contents: &str, key: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (k, v) = line.trim().split_once('=')?;
+        if k.trim() != key {
+            return None;
+        }
+        let v = v.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        (!v.is_empty()).then(|| v.to_string())
+    })
 }
 
 /// Body of `POST /api/voice/installs/heartbeat`. The daemon supplies
@@ -2629,6 +2702,86 @@ mod tests {
             !sys.arch.is_empty(),
             "arch should be a non-empty target string"
         );
+    }
+
+    fn files(entries: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = entries
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect();
+        move |path| map.get(path).cloned()
+    }
+
+    #[test]
+    fn host_os_version_reads_flatpak_host_os_release() {
+        let read = files(&[
+            // The runtime's own file must not win.
+            (
+                "/etc/os-release",
+                "ID=org.freedesktop.platform\nVERSION_ID=24.08\n",
+            ),
+            (
+                "/run/host/os-release",
+                "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nID=ubuntu\n",
+            ),
+        ]);
+        assert_eq!(
+            host_os_version(LinuxSandbox::Flatpak, read).as_deref(),
+            Some("24.04")
+        );
+    }
+
+    #[test]
+    fn host_os_version_falls_through_flatpak_candidates() {
+        let read = files(&[("/run/host/usr/lib/os-release", "ID=fedora\nVERSION_ID=41\n")]);
+        assert_eq!(
+            host_os_version(LinuxSandbox::Flatpak, read).as_deref(),
+            Some("41")
+        );
+    }
+
+    #[test]
+    fn host_os_version_reads_snap_host_lsb_release() {
+        let read = files(&[
+            // Regression: the base snap's os-release reads "Ubuntu Core 24",
+            // which left the snap install's OS version blank.
+            (
+                "/etc/os-release",
+                "NAME=\"Ubuntu Core\"\nID=ubuntu-core\nVERSION_ID=\"24\"\n",
+            ),
+            (
+                "/etc/lsb-release",
+                "DISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=22.04\nDISTRIB_CODENAME=jammy\n",
+            ),
+        ]);
+        assert_eq!(
+            host_os_version(LinuxSandbox::Snap, read).as_deref(),
+            Some("22.04")
+        );
+    }
+
+    #[test]
+    fn host_os_version_is_none_when_host_file_is_unreachable() {
+        // A snap on a host without /etc/lsb-release (e.g. Fedora) must not
+        // report the base snap's version instead.
+        let read = files(&[("/etc/os-release", "ID=ubuntu-core\nVERSION_ID=\"24\"\n")]);
+        assert_eq!(host_os_version(LinuxSandbox::Snap, &read), None);
+        assert_eq!(host_os_version(LinuxSandbox::Flatpak, &read), None);
+    }
+
+    #[test]
+    fn release_value_parses_quotes_and_blanks() {
+        let contents = "# comment\nNAME='Arch Linux'\nVERSION_ID=\"\"\n  BUILD_ID = rolling \n";
+        assert_eq!(
+            release_value(contents, "NAME").as_deref(),
+            Some("Arch Linux")
+        );
+        assert_eq!(
+            release_value(contents, "BUILD_ID").as_deref(),
+            Some("rolling")
+        );
+        assert_eq!(release_value(contents, "VERSION_ID"), None);
+        assert_eq!(release_value(contents, "ID"), None);
     }
 
     #[test]
