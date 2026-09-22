@@ -494,11 +494,52 @@ impl HasSyncEnvelope for VoiceTranscriptRecord {
 
 /// SIP transport for a synced account line. Wire-stable snake_case;
 /// mirrors the daemon's `TransportKind`.
+///
+/// Builds up to 0.0.32 knew only `udp` / `tcp` and failed a whole account
+/// page on anything else. Two things keep that from happening again:
+///
+/// - [`Unknown`](VoiceTransport::Unknown) catches any transport a newer
+///   platform stores that this build doesn't know, so one such line can't
+///   fail the rest of the page. A consumer should leave that line alone,
+///   not guess a transport for it.
+/// - `#[non_exhaustive]`, so the next transport is additive for consumers
+///   that `match` on this type.
+///
+/// The platform also hides transports a client didn't ask for (see
+/// [`VoiceAccountsQuery::transports`]), which is what protects the builds
+/// that predate both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum VoiceTransport {
     Udp,
     Tcp,
+    /// SIP over TLS (RFC 3261 §26.2).
+    Tls,
+    /// A transport this build doesn't know. Only ever produced by
+    /// deserializing; never send it — the platform rejects it.
+    #[serde(other)]
+    Unknown,
+}
+
+impl VoiceTransport {
+    /// Every transport this build can read and write — what
+    /// [`VoiceAccountsQuery::default`] asks the platform for.
+    pub const KNOWN: [VoiceTransport; 3] = [
+        VoiceTransport::Udp,
+        VoiceTransport::Tcp,
+        VoiceTransport::Tls,
+    ];
+
+    /// The wire token (`"udp"`, `"tcp"`, `"tls"`), matching serde.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+            Self::Tls => "tls",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// One SIP account line's *configuration* as it crosses the wire from a
@@ -565,8 +606,9 @@ pub struct VoiceAccountRecord {
     pub envelope: SyncEnvelope,
 }
 
-/// Query params for `GET /api/voice/accounts`. All fields optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Query params for `GET /api/voice/accounts`. Build it with
+/// `..Default::default()` so [`transports`](Self::transports) is filled in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceAccountsQuery {
     /// Include soft-deleted tombstones in the response. Absent / false
@@ -575,6 +617,28 @@ pub struct VoiceAccountsQuery {
     /// about deletes made elsewhere (doc 40).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_deleted: Option<bool>,
+    /// Comma-separated transports this client reads. The platform leaves
+    /// lines in any other transport out of the page — that is how builds
+    /// from before TLS, which send no value, never see a `tls` line.
+    /// Defaults to every [`VoiceTransport::KNOWN`]; set `None` only to
+    /// behave like one of those builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transports: Option<String>,
+}
+
+impl Default for VoiceAccountsQuery {
+    fn default() -> Self {
+        Self {
+            include_deleted: None,
+            transports: Some(
+                VoiceTransport::KNOWN
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        }
+    }
 }
 
 /// Marker for the `/api/voice/accounts/{sync,list}` endpoint pair.
@@ -589,6 +653,10 @@ pub struct VoiceAccounts;
 
 impl SyncEndpoint for VoiceAccounts {
     const RESOURCE: &'static str = "accounts";
+    /// 2: the sender knows `tls`. The platform won't let a version-1
+    /// record (a build from before TLS, holding a stale copy of a line)
+    /// overwrite a stored TLS line.
+    const CURRENT_SCHEMA_VERSION: u32 = 2;
     type Record = VoiceAccountRecord;
     type Query = VoiceAccountsQuery;
 }
@@ -3057,7 +3125,7 @@ mod tests {
         // The secret never crosses this wire, by construction.
         assert!(!s.contains("password"), "no password field: {s}");
         // Envelope flattens to the top, same as the other resources.
-        assert!(s.contains("\"schemaVersion\":1"), "{s}");
+        assert!(s.contains("\"schemaVersion\":2"), "{s}");
     }
 
     #[test]
@@ -3116,11 +3184,68 @@ mod tests {
     }
 
     #[test]
+    fn voice_transport_tls_uses_its_wire_token() {
+        assert_eq!(
+            serde_json::to_string(&VoiceTransport::Tls).unwrap(),
+            "\"tls\""
+        );
+        let back: VoiceTransport = serde_json::from_str("\"tls\"").unwrap();
+        assert_eq!(back, VoiceTransport::Tls);
+        for t in VoiceTransport::KNOWN {
+            assert_eq!(
+                serde_json::to_string(&t).unwrap(),
+                format!("\"{}\"", t.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_transport_does_not_fail_the_page() {
+        // The 0.0.32 failure mode: one line in a transport the build
+        // didn't know failed the whole page. Now it lands as Unknown and
+        // the other lines still parse.
+        let page = r#"[
+            {"sourceId":"a","enabled":true,"displayName":"Plain","username":"u",
+             "domain":"d","transport":"udp","registerExpires":60,
+             "disclosureEnabled":true,"updatedAt":"2026-06-20T10:00:00Z"},
+            {"sourceId":"b","enabled":true,"displayName":"Future","username":"u",
+             "domain":"d","transport":"ws","registerExpires":60,
+             "disclosureEnabled":true,"updatedAt":"2026-06-20T10:00:00Z"}
+        ]"#;
+        let parsed: Vec<VoiceAccountRecord> = serde_json::from_str(page).unwrap();
+        assert_eq!(parsed[0].transport, VoiceTransport::Udp);
+        assert_eq!(parsed[1].transport, VoiceTransport::Unknown);
+    }
+
+    #[test]
+    fn accounts_records_are_stamped_as_tls_aware() {
+        // The platform refuses a TLS-line overwrite from anything below 2.
+        assert_eq!(<VoiceAccounts as SyncEndpoint>::CURRENT_SCHEMA_VERSION, 2);
+        assert_eq!(
+            SyncEnvelope::for_endpoint::<VoiceAccounts>().schema_version,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn accounts_query_asks_for_every_known_transport_by_default() {
+        // Without it the platform treats us as a pre-TLS build and hides
+        // TLS lines.
+        let q = serde_json::to_string(&VoiceAccountsQuery::default()).unwrap();
+        assert_eq!(q, r#"{"transports":"udp,tcp,tls"}"#);
+    }
+
+    #[test]
     fn accounts_query_omits_unset_and_serializes_include_deleted() {
-        let empty = serde_json::to_string(&VoiceAccountsQuery::default()).unwrap();
-        assert_eq!(empty, "{}", "default query should be empty: {empty}");
+        let legacy = serde_json::to_string(&VoiceAccountsQuery {
+            include_deleted: None,
+            transports: None,
+        })
+        .unwrap();
+        assert_eq!(legacy, "{}", "an unset query should be empty: {legacy}");
         let with_deleted = serde_json::to_string(&VoiceAccountsQuery {
             include_deleted: Some(true),
+            ..Default::default()
         })
         .unwrap();
         assert!(
