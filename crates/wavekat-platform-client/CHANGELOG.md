@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.33](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.32...v0.0.33) - 2026-09-22
+
+### Added
+
+- [**breaking**] sync TLS account lines ([#65](https://github.com/wavekat/wavekat-platform-client/pull/65))
+
 ## [0.0.32](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.31...v0.0.32) - 2026-09-16
 
 ### Fixed
