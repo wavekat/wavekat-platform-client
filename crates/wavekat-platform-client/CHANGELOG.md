@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.33...v0.0.34) - 2026-10-05
+
+### Added
+
+- let consumers set the client User-Agent ([#67](https://github.com/wavekat/wavekat-platform-client/pull/67))
+
 ## [0.0.33](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.32...v0.0.33) - 2026-09-22
 
 ### Added
