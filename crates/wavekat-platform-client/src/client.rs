@@ -36,6 +36,23 @@ impl Client {
     /// Build a client for the given platform base URL, authenticated with
     /// `token`. The base URL's trailing slash (if any) is stripped.
     pub fn new(base_url: impl Into<String>, token: Token) -> Result<Self> {
+        Self::with_user_agent(
+            base_url,
+            token,
+            concat!("wavekat-platform-client/", env!("CARGO_PKG_VERSION")),
+        )
+    }
+
+    /// Like [`Client::new`], but sends `user_agent` instead of the crate's
+    /// own `wavekat-platform-client/<version>`. The platform attributes
+    /// requests by User-Agent — `wavekat-cli/<version>` is what fills the
+    /// CLI-version column in its usage analytics — so a consumer that
+    /// wants its traffic told apart passes its own name and version here.
+    pub fn with_user_agent(
+        base_url: impl Into<String>,
+        token: Token,
+        user_agent: &str,
+    ) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let value = format!("Bearer {}", token.as_str());
         let header = HeaderValue::from_str(&value)
@@ -44,10 +61,7 @@ impl Client {
 
         let inner = reqwest::Client::builder()
             .default_headers(headers)
-            .user_agent(concat!(
-                "wavekat-platform-client/",
-                env!("CARGO_PKG_VERSION")
-            ))
+            .user_agent(user_agent)
             .build()?;
         Ok(Self {
             inner,
@@ -399,6 +413,65 @@ mod tests {
             let _ = stream.flush();
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// Like `one_shot_server`, but answers `200 {}` and hands back the
+    /// raw request head so a test can assert on the headers sent.
+    fn capturing_server() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+
+    fn user_agent_of(request: &str) -> Option<&str> {
+        request.lines().find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.eq_ignore_ascii_case("user-agent")
+                .then(|| value.trim())
+        })
+    }
+
+    #[tokio::test]
+    async fn new_sends_the_crate_user_agent() {
+        let (base, rx) = capturing_server();
+        let client = Client::new(base, Token::new("wk_test")).expect("client");
+        let _: serde_json::Value = client.get_json("/api/me").await.expect("json");
+        let request = rx.recv().expect("request");
+        let ua = user_agent_of(&request).expect("user-agent header");
+        assert!(ua.starts_with("wavekat-platform-client/"), "{ua}");
+    }
+
+    #[tokio::test]
+    async fn with_user_agent_overrides_it_and_keeps_the_bearer() {
+        // The platform parses `wavekat-cli/<version>` out of this header;
+        // the bearer must still ride along.
+        let (base, rx) = capturing_server();
+        let client = Client::with_user_agent(base, Token::new("wk_test"), "wavekat-cli/9.9.9")
+            .expect("client");
+        let _: serde_json::Value = client.get_json("/api/me").await.expect("json");
+        let request = rx.recv().expect("request");
+        assert_eq!(user_agent_of(&request), Some("wavekat-cli/9.9.9"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer wk_test"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
