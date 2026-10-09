@@ -1286,16 +1286,21 @@ pub struct InstallHeartbeatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<String>,
     /// Fleet-admin fields (build provenance, update-channel and
-    /// updater state, native arch, process start time). Flattened onto
+    /// updater state, native arch, process start time) and coarse
+    /// install metadata (time zone, UI language, SIP account counts,
+    /// feature toggles, signed-in yes/no, CPU/RAM size). Flattened onto
     /// the wire so the body stays flat JSON even though the daemon
     /// builds one value; see [`InstallHeartbeatFleet`].
     #[serde(flatten, default)]
     pub fleet: InstallHeartbeatFleet,
 }
 
-/// Optional fleet-admin fields on the install heartbeat, grouped so the
-/// daemon can build (and the platform's fleet-admin view can read) one
-/// value rather than ten loose arguments. Flattened onto
+/// Optional fleet-admin fields on the install heartbeat (build
+/// provenance, updater state, and coarse install metadata — time zone,
+/// UI language, SIP account counts, feature toggles, sign-in yes/no,
+/// hardware size), grouped so the daemon can build (and the platform's
+/// fleet-admin view can read) one value rather than a pile of loose
+/// arguments. Flattened onto
 /// [`InstallHeartbeatRequest`] via `#[serde(flatten)]`, so on the wire
 /// these fields sit alongside `installId` / `appVersion` / … with no
 /// nesting.
@@ -1367,6 +1372,65 @@ pub struct InstallHeartbeatFleet {
     /// NULL and reads it as unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_armed: Option<bool>,
+    /// The host's IANA time zone name, e.g. `"Pacific/Auckland"`, as the
+    /// OS reports it. Never a value derived from a city lookup or the
+    /// request IP. Absent means "not reported by this build", never "no
+    /// time zone": the platform stores NULL and reads it as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// The language code the app's UI is shown in — one of the app's
+    /// shipped codes, e.g. `"en"`, `"zh-Hans"`, `"pt-BR"`. Can differ
+    /// from [`InstallHeartbeatRequest::locale`] (the system locale) when
+    /// the user picked a language in the app, or when the system locale
+    /// isn't one the app ships. Absent means "not reported by this
+    /// build", never "no language".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_language: Option<String>,
+    /// How many SIP accounts are configured on this install. A count
+    /// only — no account names, servers, or users. Same meaning as the
+    /// signed-in client heartbeat's field of the same name. Absent means
+    /// "not reported by this build", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sip_accounts_total: Option<u32>,
+    /// How many of [`Self::sip_accounts_total`] are registered right
+    /// now. A count only. Same meaning as the signed-in client
+    /// heartbeat's field of the same name. Absent means "not reported by
+    /// this build", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sip_accounts_registered: Option<u32>,
+    /// How many of [`Self::sip_accounts_total`] are failing to register
+    /// right now. A count only. Same meaning as the signed-in client
+    /// heartbeat's field of the same name. Absent means "not reported by
+    /// this build", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sip_accounts_failed: Option<u32>,
+    /// Whether call recording is turned on. Absent means "not reported
+    /// by this build", never "no": the platform stores NULL and reads it
+    /// as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_enabled: Option<bool>,
+    /// Whether Settings → Automation (command-line / MCP control of the
+    /// app) is turned on. Absent means "not reported by this build",
+    /// never "no".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_enabled: Option<bool>,
+    /// Whether the on-device speech-to-text model is downloaded and
+    /// usable. Absent means "not reported by this build", never "no".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_ready: Option<bool>,
+    /// Whether a WaveKat account is signed in on this install. A yes/no
+    /// only — the anonymous ping still carries no identity (no user id,
+    /// no email). Absent means "not reported by this build", never "no".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// The host's logical CPU count. Absent means "not reported by this
+    /// build", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u32>,
+    /// The host's total RAM, rounded to the nearest whole GB. Absent
+    /// means "not reported by this build", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_gb: Option<u32>,
 }
 
 /// The platform's view of an install row, echoed back from a heartbeat.
@@ -2519,7 +2583,7 @@ mod tests {
         // `fleet: InstallHeartbeatFleet::default()` (all `None`) must
         // serialize to exactly the key set the platform saw before this
         // struct existed — flatten + `skip_serializing_if` must not
-        // leak an empty-object marker or any of the ten new keys.
+        // leak an empty-object marker or any of the fleet keys.
         let req = InstallHeartbeatRequest {
             install_id: "11111111-1111-4111-8111-111111111111".into(),
             app_version: "0.0.21".into(),
@@ -2551,6 +2615,36 @@ mod tests {
         assert_eq!(keys, expected, "unexpected key set: {value}");
     }
 
+    /// Every [`InstallHeartbeatFleet`] field set, so a test that uses it
+    /// fails to compile — rather than silently skipping a key — when a
+    /// field is added without being covered here.
+    fn full_install_heartbeat_fleet() -> InstallHeartbeatFleet {
+        InstallHeartbeatFleet {
+            build_sha: Some("deadbeef".into()),
+            install_source: Some("mas".into()),
+            update_channel: Some("stable".into()),
+            updater_enabled: Some(false),
+            updater_status: Some("idle".into()),
+            updater_version: Some("0.0.22".into()),
+            updater_checked_at: Some("2026-09-07T10:00:00.000Z".into()),
+            updater_error: Some("network timeout".into()),
+            native_arch: Some("arm64".into()),
+            started_at: Some("2026-09-07T09:00:00.000Z".into()),
+            flow_armed: Some(true),
+            timezone: Some("Pacific/Auckland".into()),
+            app_language: Some("zh-Hans".into()),
+            sip_accounts_total: Some(3),
+            sip_accounts_registered: Some(2),
+            sip_accounts_failed: Some(1),
+            recording_enabled: Some(true),
+            automation_enabled: Some(false),
+            transcription_ready: Some(true),
+            signed_in: Some(false),
+            cpu_cores: Some(10),
+            memory_gb: Some(16),
+        }
+    }
+
     #[test]
     fn install_heartbeat_request_with_full_fleet_serializes_camel_case() {
         let req = InstallHeartbeatRequest {
@@ -2561,19 +2655,7 @@ mod tests {
             arch: Some("aarch64".into()),
             locale: Some("en-NZ".into()),
             distribution: Some("mas".into()),
-            fleet: InstallHeartbeatFleet {
-                build_sha: Some("deadbeef".into()),
-                install_source: Some("mas".into()),
-                update_channel: Some("stable".into()),
-                updater_enabled: Some(false),
-                updater_status: Some("idle".into()),
-                updater_version: Some("0.0.22".into()),
-                updater_checked_at: Some("2026-09-07T10:00:00.000Z".into()),
-                updater_error: Some("network timeout".into()),
-                native_arch: Some("arm64".into()),
-                started_at: Some("2026-09-07T09:00:00.000Z".into()),
-                flow_armed: Some(true),
-            },
+            fleet: full_install_heartbeat_fleet(),
         };
         let value: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(value["buildSha"], "deadbeef");
@@ -2589,6 +2671,77 @@ mod tests {
         assert_eq!(value["startedAt"], "2026-09-07T09:00:00.000Z");
         assert_eq!(value["flowArmed"], serde_json::json!(true));
         assert!(value["flowArmed"].is_boolean(), "{value}");
+        assert_eq!(value["timezone"], "Pacific/Auckland");
+        assert_eq!(value["appLanguage"], "zh-Hans");
+        assert_eq!(value["sipAccountsTotal"], serde_json::json!(3));
+        assert_eq!(value["sipAccountsRegistered"], serde_json::json!(2));
+        assert_eq!(value["sipAccountsFailed"], serde_json::json!(1));
+        assert!(value["sipAccountsTotal"].is_u64(), "{value}");
+        assert_eq!(value["recordingEnabled"], serde_json::json!(true));
+        assert_eq!(value["automationEnabled"], serde_json::json!(false));
+        assert_eq!(value["transcriptionReady"], serde_json::json!(true));
+        assert_eq!(value["signedIn"], serde_json::json!(false));
+        assert!(value["signedIn"].is_boolean(), "{value}");
+        assert_eq!(value["cpuCores"], serde_json::json!(10));
+        assert_eq!(value["memoryGb"], serde_json::json!(16));
+    }
+
+    #[test]
+    fn install_heartbeat_request_with_full_fleet_has_exact_camel_case_key_set() {
+        // Every fleet field set must add exactly its camelCase key next
+        // to the base request keys — no snake_case leak, no nesting, no
+        // stray key.
+        let req = InstallHeartbeatRequest {
+            install_id: "11111111-1111-4111-8111-111111111111".into(),
+            app_version: "0.0.21".into(),
+            os: "macos".into(),
+            os_version: Some("15.5.0".into()),
+            arch: Some("aarch64".into()),
+            locale: Some("en-NZ".into()),
+            distribution: Some("mas".into()),
+            fleet: full_install_heartbeat_fleet(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "installId",
+            "appVersion",
+            "os",
+            "osVersion",
+            "arch",
+            "locale",
+            "distribution",
+            "buildSha",
+            "installSource",
+            "updateChannel",
+            "updaterEnabled",
+            "updaterStatus",
+            "updaterVersion",
+            "updaterCheckedAt",
+            "updaterError",
+            "nativeArch",
+            "startedAt",
+            "flowArmed",
+            "timezone",
+            "appLanguage",
+            "sipAccountsTotal",
+            "sipAccountsRegistered",
+            "sipAccountsFailed",
+            "recordingEnabled",
+            "automationEnabled",
+            "transcriptionReady",
+            "signedIn",
+            "cpuCores",
+            "memoryGb",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "unexpected key set: {value}");
     }
 
     #[test]
@@ -2601,19 +2754,7 @@ mod tests {
             arch: Some("aarch64".into()),
             locale: Some("en-NZ".into()),
             distribution: Some("mas".into()),
-            fleet: InstallHeartbeatFleet {
-                build_sha: Some("deadbeef".into()),
-                install_source: Some("mas".into()),
-                update_channel: Some("stable".into()),
-                updater_enabled: Some(false),
-                updater_status: Some("idle".into()),
-                updater_version: Some("0.0.22".into()),
-                updater_checked_at: Some("2026-09-07T10:00:00.000Z".into()),
-                updater_error: Some("network timeout".into()),
-                native_arch: Some("arm64".into()),
-                started_at: Some("2026-09-07T09:00:00.000Z".into()),
-                flow_armed: Some(true),
-            },
+            fleet: full_install_heartbeat_fleet(),
         };
         let s = serde_json::to_string(&req).unwrap();
         let round_tripped: InstallHeartbeatRequest = serde_json::from_str(&s).unwrap();
@@ -2623,8 +2764,8 @@ mod tests {
     #[test]
     fn install_heartbeat_request_without_fleet_keys_deserializes_to_default_fleet() {
         // A body from a daemon that predates the fleet fields (or one
-        // that simply has nothing to report) carries none of the eleven
-        // fleet keys. It must still parse, with `fleet` coming back as
+        // that simply has nothing to report) carries none of the fleet
+        // keys. It must still parse, with `fleet` coming back as
         // the all-`None` default.
         let raw = r#"{
             "installId": "11111111-1111-4111-8111-111111111111",
@@ -2637,6 +2778,32 @@ mod tests {
         }"#;
         let parsed: InstallHeartbeatRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.fleet, InstallHeartbeatFleet::default());
+    }
+
+    #[test]
+    fn install_heartbeat_request_without_metadata_keys_leaves_them_none() {
+        // A body from a daemon that sends the original fleet keys but
+        // predates the install-metadata ones (timezone, appLanguage, SIP
+        // counts, toggles, signedIn, cpuCores, memoryGb) must still parse,
+        // with the metadata fields read as "not reported" (None).
+        let raw = r#"{
+            "installId": "11111111-1111-4111-8111-111111111111",
+            "appVersion": "0.0.21",
+            "os": "macos",
+            "buildSha": "deadbeef",
+            "updaterEnabled": false,
+            "flowArmed": true
+        }"#;
+        let parsed: InstallHeartbeatRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.fleet,
+            InstallHeartbeatFleet {
+                build_sha: Some("deadbeef".into()),
+                updater_enabled: Some(false),
+                flow_armed: Some(true),
+                ..InstallHeartbeatFleet::default()
+            }
+        );
     }
 
     #[test]
