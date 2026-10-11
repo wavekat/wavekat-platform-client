@@ -44,6 +44,7 @@ mod sign;
 mod sync;
 mod token;
 mod voice;
+mod voice_tasks;
 
 pub use client::Client;
 pub use error::{Error, Result};
@@ -67,4 +68,9 @@ pub use voice::{
     VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
     VoiceSystemFlowRecord, VoiceSystemFlowsPage, VoiceTranscriptChannel, VoiceTranscriptRecord,
     VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport, USAGE_EVENTS_MAX_BATCH,
+};
+pub use voice_tasks::{
+    TaskClaim, VoiceTaskAttemptRecord, VoiceTaskAttempts, VoiceTaskAttemptsQuery,
+    VoiceTaskBatchRecord, VoiceTaskBatchesPage, VoiceTaskBatchesQuery, VoiceTaskCounts,
+    VoiceTaskOutcomeField, VoiceTaskRecord,
 };
