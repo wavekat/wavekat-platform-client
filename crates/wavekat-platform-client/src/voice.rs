@@ -2037,6 +2037,14 @@ pub struct VoicePromptGenerated {
     /// signed in).
     #[serde(default)]
     pub free_chars_remaining: Option<u32>,
+    /// Whether the clip is ephemeral: owned by the caller but kept out of
+    /// the library and deleted at [`Self::expires_at`]. `false` from older
+    /// servers, and for anonymous callers, which ignore the request flag.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// When an ephemeral clip expires (ISO 8601); `None` otherwise.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// One curated, telephony-cleared text-to-speech voice.
@@ -4152,6 +4160,20 @@ mod tests {
         assert_eq!(g.duration_ms, Some(2100));
         let quota = g.quota.expect("signed-in quota");
         assert_eq!((quota.used, quota.limit), (1038, 20000));
+        // An older server sends neither field.
+        assert!(!g.ephemeral);
+        assert_eq!(g.expires_at, None);
+    }
+
+    #[test]
+    fn generated_prompt_parses_the_ephemeral_fields() {
+        let mut v: serde_json::Value = serde_json::from_str(GENERATED).unwrap();
+        v["saved"] = false.into();
+        v["ephemeral"] = true.into();
+        v["expiresAt"] = "2026-10-24T00:00:00.000Z".into();
+        let g: VoicePromptGenerated = serde_json::from_value(v).unwrap();
+        assert!(g.ephemeral && !g.saved);
+        assert_eq!(g.expires_at.as_deref(), Some("2026-10-24T00:00:00.000Z"));
     }
 
     #[tokio::test]
