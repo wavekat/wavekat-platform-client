@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.36](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.35...v0.0.36) - 2026-10-17
+
+### Added
+
+- add prompt TTS endpoints ([#72](https://github.com/wavekat/wavekat-platform-client/pull/72))
+
 ## [0.0.35](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.34...v0.0.35) - 2026-10-09
 
 ### Added
