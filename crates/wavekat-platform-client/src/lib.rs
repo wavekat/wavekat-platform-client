@@ -46,7 +46,7 @@ mod token;
 mod voice;
 
 pub use client::Client;
-pub use error::{Error, Result};
+pub use error::{Error, Result, VoicePromptError, VoicePromptQuotaKind};
 pub use me::{DeletionPreview, Me};
 pub use oauth::{loopback_handshake, HandshakeOptions, HandshakeOutcome, PendingHandshake};
 pub use sign::{
@@ -63,8 +63,11 @@ pub use voice::{
     UsageEventsResponse, VoiceAccountRecord, VoiceAccounts, VoiceAccountsQuery, VoiceCallCodec,
     VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallFlowOutcome,
     VoiceCallFlowStep, VoiceCallRecord, VoiceCalls, VoiceCallsQuery, VoiceFlowAssetsPage,
-    VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage, VoiceFlowsQuery, VoiceRecordingRecord,
-    VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery, VoiceRecordingsSyncResponse,
-    VoiceSystemFlowRecord, VoiceSystemFlowsPage, VoiceTranscriptChannel, VoiceTranscriptRecord,
-    VoiceTranscripts, VoiceTranscriptsQuery, VoiceTransport, USAGE_EVENTS_MAX_BATCH,
+    VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage, VoiceFlowsQuery,
+    VoicePromptAnonAllowance, VoicePromptConfig, VoicePromptFormat, VoicePromptGenerateRequest,
+    VoicePromptGenerated, VoicePromptPreset, VoicePromptQuota, VoicePromptVoice, VoicePromptVoices,
+    VoiceRecordingRecord, VoiceRecordingSyncItem, VoiceRecordings, VoiceRecordingsQuery,
+    VoiceRecordingsSyncResponse, VoiceSystemFlowRecord, VoiceSystemFlowsPage,
+    VoiceTranscriptChannel, VoiceTranscriptRecord, VoiceTranscripts, VoiceTranscriptsQuery,
+    VoiceTransport, USAGE_EVENTS_MAX_BATCH,
 };

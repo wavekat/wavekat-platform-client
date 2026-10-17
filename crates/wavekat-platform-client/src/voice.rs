@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, VoicePromptError, VoicePromptQuotaKind};
 use crate::sign::ReleaseCredential;
 use crate::sync::{stamp_schema_version, HasSyncEnvelope, SyncEndpoint, SyncEnvelope, SyncRequest};
 
@@ -1907,6 +1907,340 @@ impl Client {
     }
 }
 
+// ---- Voice prompts (text-to-speech) ----------------------------------------
+//
+// The platform's prompt generator (wavekat-platform docs/15): render a line
+// of text to a phone-ready clip in one of the curated voices. The desktop
+// daemon uses it to speak a call flow's prompt text before it dials an
+// automated outbound call. Generation is metered against the caller's
+// monthly character quota; identical input from the same caller returns the
+// cached clip without re-billing.
+
+/// The audio encoding a prompt is rendered in. Wire-stable snake_case
+/// strings matching the platform's `PROMPT_FORMATS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePromptFormat {
+    /// G.711 µ-law, 8 kHz mono WAV — what a phone line carries natively.
+    /// The platform's default.
+    #[default]
+    #[serde(rename = "ulaw_8000")]
+    Ulaw8000,
+    /// 16-bit linear PCM, 8 kHz mono WAV.
+    #[serde(rename = "pcm_8000")]
+    Pcm8000,
+    /// 16-bit linear PCM, 16 kHz mono WAV.
+    #[serde(rename = "pcm_16000")]
+    Pcm16000,
+    /// MP3.
+    Mp3,
+}
+
+/// How the platform rewrites the text before speaking it. Wire-stable
+/// strings matching the platform's `PHRASING_PRESETS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePromptPreset {
+    /// Speak the text verbatim. The platform's default.
+    #[default]
+    None,
+    /// Read digit runs one digit at a time.
+    Digits,
+    /// Read phone numbers in spoken groups.
+    Phone,
+    /// Read opening hours naturally.
+    Hours,
+}
+
+/// Body of `POST /api/voice/prompts/generate`.
+///
+/// Build with [`VoicePromptGenerateRequest::new`] and adjust the public
+/// fields; `format` and `preset` default to the platform's own defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptGenerateRequest {
+    /// The text to speak. The platform caps its length (after the preset
+    /// is applied) — see [`VoicePromptConfig::max_chars`].
+    pub text: String,
+    /// One of the ids from [`Client::prompt_voices`].
+    pub voice_id: String,
+    pub format: VoicePromptFormat,
+    pub preset: VoicePromptPreset,
+    /// Ask for a throwaway clip: not listed in the caller's prompt library
+    /// and reaped like an anonymous clip, but still metered against the
+    /// quota. For a daemon rendering flow text on the fly, where a library
+    /// entry per call would only be clutter. Omitted from the wire when
+    /// `false`, so a platform that predates the field sees the same body
+    /// it always did.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
+}
+
+impl VoicePromptGenerateRequest {
+    /// A request for `text` in `voice_id`, with the platform's default
+    /// format (µ-law 8 kHz) and no phrasing preset, saved to the library.
+    pub fn new(text: impl Into<String>, voice_id: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            voice_id: voice_id.into(),
+            format: VoicePromptFormat::default(),
+            preset: VoicePromptPreset::default(),
+            ephemeral: false,
+        }
+    }
+}
+
+/// A signed-in caller's monthly character quota, as of this request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptQuota {
+    pub used: u32,
+    pub limit: u32,
+    /// When the quota renews (RFC 3339).
+    pub resets_at: String,
+}
+
+/// Response of `POST /api/voice/prompts/generate` — the rendered clip's
+/// metadata. Fetch its audio with [`Client::generated_prompt_bytes`] (or
+/// [`Client::prompt_bytes`] for a saved clip's id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptGenerated {
+    /// Platform-assigned clip id (`vprompt_…`).
+    pub id: String,
+    /// Relative URL that streams the clip's bytes — the gated library
+    /// route for a saved clip, the public route for an anonymous one.
+    pub bytes_url: String,
+    pub voice_id: String,
+    pub format: VoicePromptFormat,
+    pub preset: VoicePromptPreset,
+    /// The text as sent.
+    pub source_text: String,
+    /// The preset-rendered text actually spoken; `None` when the text was
+    /// spoken verbatim.
+    #[serde(default)]
+    pub rendered_text: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Characters billed (of the rendered text).
+    pub char_count: u32,
+    /// Whether the clip landed in the caller's prompt library.
+    pub saved: bool,
+    /// The monthly quota after this request — `None` for an anonymous
+    /// caller.
+    #[serde(default)]
+    pub quota: Option<VoicePromptQuota>,
+    /// Free clips left today for an anonymous caller (`None` when signed in).
+    #[serde(default)]
+    pub free_clips_remaining: Option<u32>,
+    /// Free characters left today for an anonymous caller (`None` when
+    /// signed in).
+    #[serde(default)]
+    pub free_chars_remaining: Option<u32>,
+}
+
+/// One curated, telephony-cleared text-to-speech voice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptVoice {
+    /// The id to pass as [`VoicePromptGenerateRequest::voice_id`].
+    pub id: String,
+    pub label: String,
+    /// BCP-47-ish language tag.
+    pub language: String,
+    #[serde(default)]
+    pub description: String,
+    /// Relative URL of a short audition clip, when one exists.
+    #[serde(default)]
+    pub sample_url: Option<String>,
+}
+
+/// Response of `GET /api/voice/prompts/voices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptVoices {
+    /// Voices on offer for a new prompt.
+    pub voices: Vec<VoicePromptVoice>,
+    /// Retired voices: never offered for a new pick, listed so a clip or
+    /// flow that already speaks in one can still show its name.
+    #[serde(default)]
+    pub retired: Vec<VoicePromptVoice>,
+}
+
+/// What an anonymous caller has left today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptAnonAllowance {
+    pub clips_remaining: u32,
+    pub chars_remaining: u32,
+    /// Next 00:00 UTC (RFC 3339).
+    pub resets_at: String,
+}
+
+/// Response of `GET /api/voice/prompts/config` — the generator's live
+/// limits. The signed-in monthly quota isn't here; it rides on each
+/// generate response ([`VoicePromptGenerated::quota`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePromptConfig {
+    /// Per-request character cap for a signed-in caller.
+    pub max_chars: u32,
+    /// Per-request character cap for an anonymous caller.
+    pub max_chars_anon: u32,
+    /// Whether an anonymous caller must solve a CAPTCHA first. Always
+    /// `false` for a signed-in caller.
+    #[serde(default)]
+    pub turnstile_required: bool,
+    /// Today's free allowance — `Some` only when the platform treated the
+    /// request as anonymous (no valid session).
+    #[serde(default)]
+    pub anon_allowance: Option<VoicePromptAnonAllowance>,
+}
+
+impl VoicePromptConfig {
+    /// The cap that applies to this caller: the anonymous one when the
+    /// platform didn't recognise a session, the signed-in one otherwise.
+    pub fn effective_max_chars(&self) -> u32 {
+        if self.anon_allowance.is_some() {
+            self.max_chars_anon
+        } else {
+            self.max_chars
+        }
+    }
+}
+
+/// The generate route's error body: `{ "error": "<code>", "resetsAt"? }`.
+/// `used` / `limit` aren't sent today; read if a platform starts to.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoicePromptErrorBody {
+    error: String,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    used: Option<u32>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Re-read a generate failure as a typed [`VoicePromptError`] (or
+/// [`Error::Unauthorized`]) when the body carries a code we know. Anything
+/// else — a validation 400, an HTML error page — stays as it was.
+/// `text_too_long` comes back without its cap; the caller fills that in.
+fn classify_prompt_error(err: Error, voice_id: &str) -> Error {
+    let Error::Http {
+        status,
+        ref url,
+        ref body,
+    } = err
+    else {
+        return err;
+    };
+    let Ok(parsed) = serde_json::from_str::<VoicePromptErrorBody>(body) else {
+        return err;
+    };
+    let quota = |kind| VoicePromptError::QuotaExceeded {
+        kind,
+        used: parsed.used,
+        limit: parsed.limit,
+        resets_at: parsed.resets_at.clone(),
+    };
+    match (status, parsed.error.as_str()) {
+        (400, "text_too_long") => VoicePromptError::TextTooLong { max_chars: None }.into(),
+        (400, "unknown_voice") => VoicePromptError::UnknownVoice {
+            voice_id: voice_id.to_string(),
+        }
+        .into(),
+        (429, "quota_exceeded") => quota(VoicePromptQuotaKind::Monthly).into(),
+        (429, "anon_daily_exceeded") => quota(VoicePromptQuotaKind::AnonDaily).into(),
+        (429, "anon_budget_exceeded") => quota(VoicePromptQuotaKind::AnonBudget).into(),
+        (502, "provider_failed") => VoicePromptError::ProviderFailed.into(),
+        // The session didn't resolve: the platform fell through to its
+        // anonymous path and asked for a CAPTCHA (403), or found no user
+        // row behind the token (400). Either way the remedy is signing in.
+        (403, "turnstile_failed") | (400, "unauthenticated") => Error::Unauthorized {
+            url: url.clone(),
+            body: body.clone(),
+        },
+        _ => err,
+    }
+}
+
+impl Client {
+    /// `POST /api/voice/prompts/generate` — render `request.text` to a
+    /// phone-ready clip.
+    ///
+    /// Refusals the caller can act on come back as
+    /// [`Error::VoicePrompt`]; for [`VoicePromptError::TextTooLong`] the
+    /// client makes one best-effort `GET /api/voice/prompts/config` to
+    /// report the cap in force. A request that reached the platform
+    /// without a valid session is [`Error::Unauthorized`].
+    pub async fn generate_prompt(
+        &self,
+        request: &VoicePromptGenerateRequest,
+    ) -> Result<VoicePromptGenerated> {
+        match self
+            .post_json::<VoicePromptGenerated, _>("/api/voice/prompts/generate", request)
+            .await
+        {
+            Ok(generated) => Ok(generated),
+            Err(err) => match classify_prompt_error(err, &request.voice_id) {
+                Error::VoicePrompt(VoicePromptError::TextTooLong { .. }) => {
+                    let max_chars = self
+                        .prompt_config()
+                        .await
+                        .ok()
+                        .map(|c| c.effective_max_chars());
+                    Err(VoicePromptError::TextTooLong { max_chars }.into())
+                }
+                other => Err(other),
+            },
+        }
+    }
+
+    /// `GET /api/voice/prompts/{id}/bytes` — a saved clip's audio, in the
+    /// format it was generated in. Scoped to the caller: a clip that isn't
+    /// theirs (or whose bytes are gone) is a 404. Returned in memory; a
+    /// clip is tens of KB.
+    pub async fn prompt_bytes(&self, prompt_id: &str) -> Result<Vec<u8>> {
+        if prompt_id.is_empty() {
+            return Err(Error::BadRequest("prompt_id must not be empty".into()));
+        }
+        self.get_bytes(&format!("/api/voice/prompts/{prompt_id}/bytes"))
+            .await
+    }
+
+    /// The audio of a clip [`Client::generate_prompt`] just returned,
+    /// fetched from its own [`VoicePromptGenerated::bytes_url`] — so it
+    /// works whether the platform saved the clip, kept it ephemeral, or
+    /// served it from the anonymous route.
+    pub async fn generated_prompt_bytes(&self, prompt: &VoicePromptGenerated) -> Result<Vec<u8>> {
+        // Only follow a same-origin, rooted path: the bearer token rides
+        // on this request and must never be sent anywhere else.
+        if !prompt.bytes_url.starts_with("/api/") {
+            return Err(Error::BadRequest(format!(
+                "unexpected prompt bytes URL {:?}",
+                prompt.bytes_url
+            )));
+        }
+        self.get_bytes(&prompt.bytes_url).await
+    }
+
+    /// `GET /api/voice/prompts/voices` — the curated voices a prompt can be
+    /// rendered in, plus the retired ones (for labelling old clips).
+    pub async fn prompt_voices(&self) -> Result<VoicePromptVoices> {
+        self.get_json::<VoicePromptVoices>("/api/voice/prompts/voices")
+            .await
+    }
+
+    /// `GET /api/voice/prompts/config` — the per-request character caps
+    /// (and, for an unrecognised session, today's free allowance).
+    pub async fn prompt_config(&self) -> Result<VoicePromptConfig> {
+        self.get_json::<VoicePromptConfig>("/api/voice/prompts/config")
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3641,5 +3975,429 @@ mod tests {
         assert!(rec.published_at.is_none());
         assert_eq!(rec.access, "account");
         assert!(rec.system_tags.is_empty());
+    }
+
+    // ---- Voice prompts ------------------------------------------------------
+
+    /// An HTTP/1.1 server on an ephemeral port that answers one connection
+    /// per `(status, body)` in order, then exits, handing back each raw
+    /// request (head + body) so a test can assert on path and JSON sent.
+    /// `std::net` because the tokio dev-dependency carries no `net`.
+    fn scripted_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                // Read the head, then exactly Content-Length body bytes.
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req);
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let len = text[..head_end]
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if req.len() >= head_end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+
+    fn test_client(base: String) -> Client {
+        Client::new(base, crate::Token::new("wk_test")).expect("client")
+    }
+
+    fn request_body(raw: &str) -> serde_json::Value {
+        let (_, body) = raw.split_once("\r\n\r\n").expect("request body");
+        serde_json::from_str(body).expect("json body")
+    }
+
+    const GENERATED: &str = r#"{
+        "id": "vprompt_abc",
+        "bytesUrl": "/api/voice/prompts/vprompt_abc/bytes",
+        "voiceId": "v1",
+        "format": "ulaw_8000",
+        "preset": "phone",
+        "sourceText": "Call 555 0100",
+        "renderedText": "Call five five five, zero one zero zero",
+        "durationMs": 2100,
+        "charCount": 38,
+        "saved": true,
+        "quota": { "used": 1038, "limit": 20000, "resetsAt": "2026-11-01T00:00:00.000Z" },
+        "freeClipsRemaining": null,
+        "freeCharsRemaining": null,
+        "turnstilePass": false
+    }"#;
+
+    #[test]
+    fn prompt_format_and_preset_pin_their_wire_strings() {
+        for (f, s) in [
+            (VoicePromptFormat::Ulaw8000, "ulaw_8000"),
+            (VoicePromptFormat::Pcm8000, "pcm_8000"),
+            (VoicePromptFormat::Pcm16000, "pcm_16000"),
+            (VoicePromptFormat::Mp3, "mp3"),
+        ] {
+            assert_eq!(serde_json::to_value(f).unwrap(), s);
+            assert_eq!(
+                serde_json::from_value::<VoicePromptFormat>(s.into()).unwrap(),
+                f
+            );
+        }
+        for (p, s) in [
+            (VoicePromptPreset::None, "none"),
+            (VoicePromptPreset::Digits, "digits"),
+            (VoicePromptPreset::Phone, "phone"),
+            (VoicePromptPreset::Hours, "hours"),
+        ] {
+            assert_eq!(serde_json::to_value(p).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn generate_request_omits_ephemeral_when_false() {
+        // An older platform must see exactly the body it always did.
+        let req = VoicePromptGenerateRequest::new("Hello", "v1");
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "text": "Hello",
+                "voiceId": "v1",
+                "format": "ulaw_8000",
+                "preset": "none",
+            })
+        );
+    }
+
+    #[test]
+    fn generate_request_sends_ephemeral_when_true() {
+        let mut req = VoicePromptGenerateRequest::new("Hello", "v1");
+        req.ephemeral = true;
+        req.format = VoicePromptFormat::Pcm16000;
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["ephemeral"], true);
+        assert_eq!(v["format"], "pcm_16000");
+    }
+
+    #[test]
+    fn generate_response_parses_an_anonymous_clip() {
+        let g: VoicePromptGenerated = serde_json::from_str(
+            r#"{"id":"vprompt_x","bytesUrl":"/api/voice/prompts/public/vprompt_x/bytes",
+                "voiceId":"v1","format":"mp3","preset":"none","sourceText":"Hi",
+                "renderedText":null,"durationMs":null,"charCount":2,"saved":false,
+                "quota":null,"freeClipsRemaining":1,"freeCharsRemaining":118,
+                "turnstilePass":true}"#,
+        )
+        .unwrap();
+        assert!(!g.saved);
+        assert!(g.quota.is_none());
+        assert!(g.rendered_text.is_none());
+        assert_eq!(g.free_chars_remaining, Some(118));
+    }
+
+    #[tokio::test]
+    async fn generate_prompt_posts_the_body_and_parses_the_clip() {
+        let (base, rx) = scripted_server(vec![("200 OK", GENERATED)]);
+        let mut req = VoicePromptGenerateRequest::new("Call 555 0100", "v1");
+        req.preset = VoicePromptPreset::Phone;
+        req.ephemeral = true;
+        let g = test_client(base)
+            .generate_prompt(&req)
+            .await
+            .expect("generate");
+
+        let raw = rx.recv().unwrap();
+        assert!(
+            raw.starts_with("POST /api/voice/prompts/generate "),
+            "{raw}"
+        );
+        let body = request_body(&raw);
+        assert_eq!(body["voiceId"], "v1");
+        assert_eq!(body["preset"], "phone");
+        assert_eq!(body["ephemeral"], true);
+
+        assert_eq!(g.id, "vprompt_abc");
+        assert_eq!(g.format, VoicePromptFormat::Ulaw8000);
+        assert_eq!(g.duration_ms, Some(2100));
+        let quota = g.quota.expect("signed-in quota");
+        assert_eq!((quota.used, quota.limit), (1038, 20000));
+    }
+
+    #[tokio::test]
+    async fn generate_prompt_maps_quota_exceeded() {
+        let (base, _rx) = scripted_server(vec![(
+            "429 Too Many Requests",
+            r#"{"error":"quota_exceeded","resetsAt":"2026-11-01T00:00:00.000Z"}"#,
+        )]);
+        let err = test_client(base)
+            .generate_prompt(&VoicePromptGenerateRequest::new("Hi", "v1"))
+            .await
+            .expect_err("429");
+        match err {
+            Error::VoicePrompt(VoicePromptError::QuotaExceeded {
+                kind, resets_at, ..
+            }) => {
+                assert_eq!(kind, VoicePromptQuotaKind::Monthly);
+                assert_eq!(resets_at.as_deref(), Some("2026-11-01T00:00:00.000Z"));
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quota_exceeded_reads_used_and_limit_when_sent() {
+        let err = classify_prompt_error(
+            Error::Http {
+                status: 429,
+                url: "u".into(),
+                body: r#"{"error":"quota_exceeded","used":20000,"limit":20000,"resetsAt":"R"}"#
+                    .into(),
+            },
+            "v1",
+        );
+        let s = err.to_string();
+        assert!(s.contains("20000 of 20000"), "{s}");
+        assert!(s.contains("resets at R"), "{s}");
+    }
+
+    #[test]
+    fn anon_caps_map_to_their_quota_kinds() {
+        for (code, kind) in [
+            ("anon_daily_exceeded", VoicePromptQuotaKind::AnonDaily),
+            ("anon_budget_exceeded", VoicePromptQuotaKind::AnonBudget),
+        ] {
+            let err = classify_prompt_error(
+                Error::Http {
+                    status: 429,
+                    url: "u".into(),
+                    body: format!(r#"{{"error":"{code}"}}"#),
+                },
+                "v1",
+            );
+            assert!(
+                matches!(err, Error::VoicePrompt(VoicePromptError::QuotaExceeded { kind: k, .. }) if k == kind),
+                "{code}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_prompt_reports_the_cap_on_text_too_long() {
+        // The refusal carries no cap, so the client reads it back from the
+        // config route — the signed-in cap, since no anon allowance came back.
+        let (base, rx) = scripted_server(vec![
+            ("400 Bad Request", r#"{"error":"text_too_long"}"#),
+            (
+                "200 OK",
+                r#"{"maxChars":600,"maxCharsAnon":120,"turnstileRequired":false,"anonAllowance":null}"#,
+            ),
+        ]);
+        let err = test_client(base)
+            .generate_prompt(&VoicePromptGenerateRequest::new("x".repeat(700), "v1"))
+            .await
+            .expect_err("400");
+        assert!(
+            matches!(
+                err,
+                Error::VoicePrompt(VoicePromptError::TextTooLong {
+                    max_chars: Some(600)
+                })
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("600 characters"), "{err}");
+        let _generate = rx.recv().unwrap();
+        assert!(rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/voice/prompts/config "));
+    }
+
+    #[tokio::test]
+    async fn text_too_long_without_a_readable_config_has_no_cap() {
+        let (base, _rx) = scripted_server(vec![
+            ("400 Bad Request", r#"{"error":"text_too_long"}"#),
+            ("500 Internal Server Error", r#"{"error":"boom"}"#),
+        ]);
+        let err = test_client(base)
+            .generate_prompt(&VoicePromptGenerateRequest::new("x", "v1"))
+            .await
+            .expect_err("400");
+        assert!(
+            matches!(
+                err,
+                Error::VoicePrompt(VoicePromptError::TextTooLong { max_chars: None })
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_prompt_maps_unknown_voice() {
+        let (base, _rx) =
+            scripted_server(vec![("400 Bad Request", r#"{"error":"unknown_voice"}"#)]);
+        let err = test_client(base)
+            .generate_prompt(&VoicePromptGenerateRequest::new("Hi", "nope"))
+            .await
+            .expect_err("400");
+        assert_eq!(err.to_string(), r#"unknown text-to-speech voice "nope""#);
+    }
+
+    #[test]
+    fn a_dropped_session_reads_as_unauthorized() {
+        // An unrecognised token falls through to the anonymous path, which
+        // asks for a CAPTCHA a daemon can't solve: the remedy is sign-in.
+        for (status, code) in [(403, "turnstile_failed"), (400, "unauthenticated")] {
+            let err = classify_prompt_error(
+                Error::Http {
+                    status,
+                    url: "u".into(),
+                    body: format!(r#"{{"error":"{code}"}}"#),
+                },
+                "v1",
+            );
+            assert!(matches!(err, Error::Unauthorized { .. }), "{code}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn provider_failure_and_unknown_codes() {
+        let err = classify_prompt_error(
+            Error::Http {
+                status: 502,
+                url: "u".into(),
+                body: r#"{"error":"provider_failed"}"#.into(),
+            },
+            "v1",
+        );
+        assert!(matches!(
+            err,
+            Error::VoicePrompt(VoicePromptError::ProviderFailed)
+        ));
+
+        // A zod validation 400 or a non-JSON body stays a plain HTTP error.
+        for body in [r#"{"success":false,"error":{"name":"ZodError"}}"#, "<html>"] {
+            let err = classify_prompt_error(
+                Error::Http {
+                    status: 400,
+                    url: "u".into(),
+                    body: body.into(),
+                },
+                "v1",
+            );
+            assert!(matches!(err, Error::Http { status: 400, .. }), "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_bytes_fetches_the_gated_route() {
+        let (base, rx) = scripted_server(vec![("200 OK", "RIFF....WAVE")]);
+        let bytes = test_client(base)
+            .prompt_bytes("vprompt_abc")
+            .await
+            .expect("bytes");
+        assert_eq!(bytes, b"RIFF....WAVE");
+        assert!(rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/voice/prompts/vprompt_abc/bytes "));
+    }
+
+    #[tokio::test]
+    async fn generated_prompt_bytes_follows_the_returned_url() {
+        let (base, rx) = scripted_server(vec![("200 OK", "RIFF....WAVE")]);
+        let mut g: VoicePromptGenerated = serde_json::from_str(GENERATED).unwrap();
+        g.bytes_url = "/api/voice/prompts/public/vprompt_abc/bytes".into();
+        let bytes = test_client(base)
+            .generated_prompt_bytes(&g)
+            .await
+            .expect("bytes");
+        assert_eq!(bytes, b"RIFF....WAVE");
+        assert!(rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/voice/prompts/public/vprompt_abc/bytes "));
+    }
+
+    #[tokio::test]
+    async fn generated_prompt_bytes_refuses_an_off_origin_url() {
+        // The bearer rides on this request; never follow it elsewhere.
+        let mut g: VoicePromptGenerated = serde_json::from_str(GENERATED).unwrap();
+        g.bytes_url = "https://elsewhere.test/x".into();
+        let client = test_client("http://127.0.0.1:9".into());
+        let err = client
+            .generated_prompt_bytes(&g)
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, Error::BadRequest(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn prompt_voices_parses_voices_and_retired() {
+        let (base, rx) = scripted_server(vec![(
+            "200 OK",
+            r#"{"voices":[{"id":"v1","label":"Ava","language":"en","description":"Warm","sampleUrl":"/api/voice/prompts/voices/v1/sample"}],
+                "retired":[{"id":"v0","label":"Old","language":"en","description":"","sampleUrl":null}]}"#,
+        )]);
+        let v = test_client(base).prompt_voices().await.expect("voices");
+        assert!(rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/voice/prompts/voices "));
+        assert_eq!(v.voices.len(), 1);
+        assert_eq!(v.voices[0].id, "v1");
+        assert_eq!(
+            v.voices[0].sample_url.as_deref(),
+            Some("/api/voice/prompts/voices/v1/sample")
+        );
+        assert_eq!(v.retired[0].sample_url, None);
+    }
+
+    #[test]
+    fn prompt_config_picks_the_cap_for_this_caller() {
+        let signed_in: VoicePromptConfig = serde_json::from_str(
+            r#"{"maxChars":600,"maxCharsAnon":120,"turnstileRequired":false,"anonAllowance":null}"#,
+        )
+        .unwrap();
+        assert_eq!(signed_in.effective_max_chars(), 600);
+
+        let anon: VoicePromptConfig = serde_json::from_str(
+            r#"{"maxChars":600,"maxCharsAnon":120,"turnstileRequired":true,
+                "anonAllowance":{"clipsRemaining":2,"charsRemaining":240,"resetsAt":"R"}}"#,
+        )
+        .unwrap();
+        assert_eq!(anon.effective_max_chars(), 120);
+        assert_eq!(anon.anon_allowance.unwrap().chars_remaining, 240);
     }
 }
