@@ -73,6 +73,96 @@ pub enum Error {
     /// Local I/O failure (loopback bind, socket read/write, …).
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The platform refused a voice-prompt (text-to-speech) request for a
+    /// reason the caller can act on — see [`VoicePromptError`]. Split out
+    /// from [`Error::Http`] so a consumer can say "quota used up, resets
+    /// on …" instead of showing a raw `HTTP 429` body.
+    #[error(transparent)]
+    VoicePrompt(#[from] VoicePromptError),
+}
+
+/// Why `POST /api/voice/prompts/generate` refused to render a clip.
+///
+/// Each variant is one of the platform's machine-readable error codes,
+/// and its `Display` is a plain sentence a consumer can show as-is. A
+/// sign-in problem is not here: it surfaces as [`Error::Unauthorized`],
+/// the same remedy as every other endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum VoicePromptError {
+    /// The text (after any phrasing preset is applied) is longer than the
+    /// per-request character cap. `max_chars` is the cap in force, when
+    /// the client could read it back from `GET /api/voice/prompts/config`.
+    #[error("{}", text_too_long_message(*.max_chars))]
+    TextTooLong { max_chars: Option<u32> },
+
+    /// The caller's character allowance is used up. `used` / `limit` are
+    /// filled when the platform reports them; `resets_at` (RFC 3339) is
+    /// when the allowance renews.
+    #[error("{}", quota_message(*.kind, *.used, *.limit, .resets_at.as_deref()))]
+    QuotaExceeded {
+        kind: VoicePromptQuotaKind,
+        used: Option<u32>,
+        limit: Option<u32>,
+        resets_at: Option<String>,
+    },
+
+    /// The voice id isn't one of the platform's offered voices (or is a
+    /// retired one this caller never used).
+    #[error("unknown text-to-speech voice {voice_id:?}")]
+    UnknownVoice { voice_id: String },
+
+    /// The upstream text-to-speech provider failed. Nothing was billed;
+    /// retrying later is the remedy.
+    #[error("the text-to-speech provider failed to render the prompt; try again later")]
+    ProviderFailed,
+}
+
+/// Which allowance a [`VoicePromptError::QuotaExceeded`] ran out of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VoicePromptQuotaKind {
+    /// The signed-in caller's monthly character quota (`quota_exceeded`).
+    Monthly,
+    /// An anonymous caller's free daily allowance (`anon_daily_exceeded`).
+    /// Seen only when the request reached the platform without a valid
+    /// session.
+    AnonDaily,
+    /// The platform-wide anonymous budget for today (`anon_budget_exceeded`).
+    AnonBudget,
+}
+
+fn text_too_long_message(max_chars: Option<u32>) -> String {
+    match max_chars {
+        Some(n) => format!("prompt text is too long: the limit is {n} characters"),
+        None => "prompt text is too long for the platform's character limit".to_string(),
+    }
+}
+
+fn quota_message(
+    kind: VoicePromptQuotaKind,
+    used: Option<u32>,
+    limit: Option<u32>,
+    resets_at: Option<&str>,
+) -> String {
+    let mut s = match kind {
+        VoicePromptQuotaKind::Monthly => "monthly voice prompt quota used up",
+        VoicePromptQuotaKind::AnonDaily => {
+            "free daily voice prompt allowance used up (not signed in)"
+        }
+        VoicePromptQuotaKind::AnonBudget => {
+            "today's free voice prompt budget is used up (not signed in)"
+        }
+    }
+    .to_string();
+    if let (Some(used), Some(limit)) = (used, limit) {
+        s.push_str(&format!(" ({used} of {limit} characters)"));
+    }
+    if let Some(at) = resets_at {
+        s.push_str(&format!("; resets at {at}"));
+    }
+    s
 }
 
 /// Split a 401 body into the two errors that need different remedies.
