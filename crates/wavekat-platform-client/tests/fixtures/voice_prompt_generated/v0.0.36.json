@@ -1,0 +1,1 @@
+{"id":"p1","bytesUrl":"/api/voice/prompts/p1/bytes","voiceId":"v1","format":"ulaw_8000","preset":"none","sourceText":"Hello","renderedText":null,"durationMs":1200,"charCount":5,"saved":true,"quota":{"used":1,"limit":50,"resetsAt":"2026-06-01T00:00:00Z"},"freeClipsRemaining":3,"freeCharsRemaining":500,"ephemeral":false,"expiresAt":null}

@@ -1,0 +1,1 @@
+{"installId":"i1","appVersion":"0.4.0","events":[{"id":"e1","name":"app_opened","occurredAt":"2026-05-16T10:00:00Z"},{"id":"e2","name":"call_answered","detail":"x","occurredAt":"2026-05-16T10:00:01Z"}]}
