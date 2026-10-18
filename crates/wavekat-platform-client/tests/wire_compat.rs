@@ -115,6 +115,35 @@ fn voice_call_v0_0_36_reads_every_field() {
 }
 
 #[test]
+fn voice_call_v0_0_36_predates_events_and_booking_details() {
+    let r: VoiceCallRecord = round_trips(fixture!("voice_call/v0.0.36"));
+    assert!(r.events.is_none());
+    let step = &r.flow_steps.as_ref().unwrap()[0];
+    assert!(step.count.is_none() && step.start.is_none());
+}
+
+#[test]
+fn voice_call_v0_0_37_carries_events_and_booking_details() {
+    let r: VoiceCallRecord = round_trips(fixture!("voice_call/v0.0.37"));
+    let steps = r.flow_steps.as_ref().unwrap();
+    assert_eq!(steps[0].count, Some(3));
+    assert_eq!(steps[1].start.as_deref(), Some("2026-05-20T14:30:00+12:00"));
+    let events = r.events.as_ref().unwrap();
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[1].state.as_deref(), Some("ringing"));
+    assert_eq!(events[3].digit.as_deref(), Some("5"));
+    assert_eq!(events[4].status, Some(486));
+}
+
+#[test]
+fn voice_call_event_accepts_a_kind_this_build_has_never_seen() {
+    let raw = r#"{"atMs":5,"kind":"call_parked","slot":7}"#;
+    let e: VoiceCallEvent = read(raw);
+    assert_eq!(e.kind, "call_parked");
+    assert!(e.state.is_none() && e.status.is_none() && e.digit.is_none());
+}
+
+#[test]
 fn voice_call_flow_step_accepts_a_kind_this_build_has_never_seen() {
     let raw = r#"{"atMs":5,"kind":"some_future_node"}"#;
     let s: VoiceCallFlowStep = read(raw);
