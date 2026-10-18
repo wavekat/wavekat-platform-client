@@ -1,0 +1,1 @@
+{"sourceId":"a1","enabled":true,"displayName":"Desk","username":"1001","domain":"sip.example.com","authUsername":"1001","server":"sip.example.com","port":5060,"transport":"udp","registerExpires":300,"keepaliveSecs":25,"disclosureEnabled":false,"updatedAt":"2026-05-16T10:00:00Z","schemaVersion":2}
