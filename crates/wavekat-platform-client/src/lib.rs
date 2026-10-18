@@ -61,7 +61,7 @@ pub use voice::{
     InstallHeartbeatRequest, InstallHeartbeatResponse, PartyMasking, ShareRecordingRequest,
     ShareRecordingResponse, ShareStateResponse, ShareVisibility, SystemInfo, UsageEvent,
     UsageEventsRequest, UsageEventsResponse, VoiceAccountRecord, VoiceAccounts, VoiceAccountsQuery,
-    VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason,
+    VoiceCallCodec, VoiceCallDirection, VoiceCallDisposition, VoiceCallEndReason, VoiceCallEvent,
     VoiceCallFlowOutcome, VoiceCallFlowStep, VoiceCallRecord, VoiceCalls, VoiceCallsQuery,
     VoiceFlowAssetsPage, VoiceFlowRecord, VoiceFlowVersionAsset, VoiceFlowsPage, VoiceFlowsQuery,
     VoicePromptAnonAllowance, VoicePromptConfig, VoicePromptFormat, VoicePromptGenerateRequest,

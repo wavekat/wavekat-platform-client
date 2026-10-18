@@ -164,6 +164,47 @@ pub struct VoiceCallFlowStep {
     /// Whether a `ring` step was picked up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered: Option<bool>,
+    /// How many appointment times were offered — `book_offered` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    /// The booked appointment's start, RFC 3339 — `booked` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+}
+
+/// One call-level event — the call rang, you answered or declined it,
+/// you pressed a key — as the daemon projects it from its local event
+/// log. What the desktop's call details lists under "Events", shipped so
+/// the platform can show the same list.
+///
+/// Same design as [`VoiceCallFlowStep`]: structural, never the daemon's
+/// English summary, and `kind` is a plain `String` so a newer daemon's
+/// kind still deserializes in an older consumer.
+///
+/// The call's end is not one of these. It is already on the record
+/// ([`VoiceCallRecord::end_at`], [`VoiceCallRecord::end_reason`],
+/// [`VoiceCallRecord::error`]), and consumers draw it from there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceCallEvent {
+    /// Milliseconds from the call's *ring* time — not answer time, as
+    /// flow steps use, because most of these happen before anyone
+    /// answers.
+    pub at_ms: i64,
+    /// The daemon's event kind: `incoming_call`, `outgoing_call`,
+    /// `call_state_changed`, `call_answered` (a person answered),
+    /// `call_flow_answered`, `call_rejected`, or `dtmf_sent` (you
+    /// pressed a key).
+    pub kind: String,
+    /// `ringing` or `active` — `call_state_changed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The SIP status sent when declining — `call_rejected` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// The key you pressed — `dtmf_sent` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digit: Option<String>,
 }
 
 /// One historical call as it crosses the wire from the daemon up to the
@@ -253,6 +294,15 @@ pub struct VoiceCallRecord {
     /// row renders a trace and it would weigh down every page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_steps: Option<Vec<VoiceCallFlowStep>>,
+    /// The call's event timeline, in time order: rang, answered,
+    /// declined, keys you pressed. Drives the "Events" list on the
+    /// platform's call-detail page.
+    ///
+    /// `None` for daemons predating the field. Like
+    /// [`VoiceCallRecord::flow_steps`], sent on sync but echoed back only
+    /// on the detail read. The platform caps it at 200 entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<VoiceCallEvent>>,
     /// RFC 3339 soft-delete tombstone. `None` = live; `Some` = the user
     /// deleted this call at that time.
     ///
@@ -2291,6 +2341,7 @@ mod tests {
             flow_name: None,
             flow_outcome: None,
             flow_steps: None,
+            events: None,
             deleted_at: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
@@ -2354,6 +2405,7 @@ mod tests {
             flow_name: None,
             flow_outcome: None,
             flow_steps: None,
+            events: None,
             deleted_at: None,
             envelope: SyncEnvelope::for_endpoint::<VoiceCalls>(),
         };
