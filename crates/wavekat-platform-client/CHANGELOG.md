@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.37](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.36...v0.0.37) - 2026-10-18
+
+### Added
+
+- add call events to voice call record ([#77](https://github.com/wavekat/wavekat-platform-client/pull/77))
+
+### Other
+
+- pin old and new wire payloads ([#75](https://github.com/wavekat/wavekat-platform-client/pull/75))
+
 ## [0.0.36](https://github.com/wavekat/wavekat-platform-client/compare/v0.0.35...v0.0.36) - 2026-10-17
 
 ### Added
