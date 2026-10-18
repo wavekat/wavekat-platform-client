@@ -80,6 +80,14 @@ release, then drop. When the *meaning* of a field needs to change,
 introduce a new name and bump `CURRENT_SCHEMA_VERSION`. Hard schema
 breaks ship as a new endpoint pair under a new `RESOURCE` segment.
 
+Never add `#[serde(deny_unknown_fields)]` to a wire type, and give enums
+read from the platform a fallback variant for values this version doesn't
+know. Old consumer builds stay installed for months, so both directions
+are pinned in tests: each `Record` has a test that reads a payload from
+the previous release (newer fields missing) and one that reads a payload
+carrying a field this version lacks. When you add a field, add a test
+beside those — don't edit the old fixtures to make the change pass.
+
 Design rationale and the calls-first slice that established the
 pattern: see [`wavekat-voice/docs/21-platform-call-history-sync.md`](https://github.com/wavekat/wavekat-voice/blob/main/docs/21-platform-call-history-sync.md).
 
