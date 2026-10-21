@@ -382,7 +382,7 @@ fn truncate(s: &str, n: usize) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A one-shot HTTP/1.1 server on an ephemeral port. Returns its base
@@ -390,7 +390,7 @@ mod tests {
     /// `body`, then exits. `std::net` rather than `tokio::net` because the
     /// dev-dependency carries no `net` feature — the same reason
     /// `oauth.rs` binds its redirect listener synchronously.
-    fn one_shot_server(status: &str, body: &'static str) -> String {
+    pub(crate) fn one_shot_server(status: &str, body: &'static str) -> String {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
